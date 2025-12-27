@@ -38,8 +38,11 @@ Make sure you have the following installed:
 
   • Edit your inverter's USB HID paths in `src/main.rs`:
 
-    let targets = [("/dev/hidrawX", 1), ("/dev/hidrawY", 2)]; // for 2 inverters
-    let targets = [("/dev/hidrawX", 1)]; // for one inverter
+        let master_s = Arc::clone(&state); //Example for 2 inverters
+        thread::spawn(move || hardware_worker(master_s, "/dev/hidrawX", "Master", 1));
+
+        let slave_s = Arc::clone(&state);
+        thread::spawn(move || hardware_worker(slave_s, "/dev/hidrawY", "Slave", 2));
     
   • Change the permissions of the `hidrawX` you are using(WARNING: this is a temporary setup, for a permanent setup, read the UDEV section ):
   
