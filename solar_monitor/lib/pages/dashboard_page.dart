@@ -22,12 +22,7 @@ class _DashboardPageState extends State<DashboardPage> {
   bool _showLoad = true;
   bool _hasInitialized = false;
 
-  // --- CONFIGURATION ---
-  // How many minutes of the day do you want to see on screen at once?
-  // Lower number = Zoomed IN more. Higher number = Zoomed OUT.
-  // 180 means 3 hours will fill the screen width.
   final double visibleMinutes = 120.0;
-
   WebSocketChannel? _channel;
   late TransformationController _transformationController;
 
@@ -39,16 +34,10 @@ class _DashboardPageState extends State<DashboardPage> {
     _fetchHistory();
   }
 
-  // Calculates and applies the zoom based on screen width
   void _initializeZoom() {
     if (!mounted) return;
-
-    // The total width of the chart is 1440 minutes.
-    // Scale = Total / What we want to see.
     double calculatedScale = 1440 / visibleMinutes;
-
     setState(() {
-      // Apply the horizontal scale
       _transformationController.value = Matrix4.identity()
         ..scale(calculatedScale, 1.0, 1.0);
       _hasInitialized = true;
@@ -66,6 +55,13 @@ class _DashboardPageState extends State<DashboardPage> {
     _channel?.sink.close();
     _transformationController.dispose();
     super.dispose();
+  }
+
+  // Matching the parsing logic from your Detail Page
+  double _parse(dynamic val) {
+    if (val == null) return 0.0;
+    String s = val.toString().replaceAll(RegExp(r'[^0-9.]'), '');
+    return double.tryParse(s) ?? 0.0;
   }
 
   Future<void> _fetchHistory() async {
@@ -129,19 +125,31 @@ class _DashboardPageState extends State<DashboardPage> {
               );
               data.forEach((key, inv) {
                 final List<dynamic> raw = inv['raw_data'] ?? [];
-                if (raw.length > 15) {
-                  totalPvWatts +=
-                      (double.tryParse(raw[11].toString()) ?? 0) *
-                          (double.tryParse(raw[12].toString()) ?? 0) +
-                      (double.tryParse(raw[14].toString()) ?? 0) *
-                          (double.tryParse(raw[15].toString()) ?? 0);
-                  totalLoadWatts += double.tryParse(raw[9].toString()) ?? 0.0;
+
+                // --- CORRECTED MAPPINGS TO MATCH DETAIL PAGE ---
+                if (raw.length > 28) {
+                  // PV1: Index 14 (Volts) * Index 25 (Amps)
+                  final double pv1V = _parse(raw[14]);
+                  final double pv1A = _parse(raw[25]);
+
+                  // PV2: Index 27 (Volts) * Index 28 (Amps)
+                  final double pv2V = _parse(raw[27]);
+                  final double pv2A = _parse(raw[28]);
+
+                  totalPvWatts += (pv1V * pv1A) + (pv2V * pv2A);
+
+                  // Load: Index 9
+                  totalLoadWatts += _parse(raw[9]);
                 }
+
+                // QED: Daily Energy
                 totalKwhToday +=
                     (double.tryParse(inv['qed']?.toString() ?? "0") ?? 0) /
                     1000.0;
               });
-            } catch (_) {}
+            } catch (e) {
+              debugPrint("Processing error: $e");
+            }
           }
 
           return Padding(
@@ -165,11 +173,10 @@ class _DashboardPageState extends State<DashboardPage> {
                   child: LayoutBuilder(
                     builder: (context, constraints) {
                       if (!_hasInitialized && constraints.maxWidth > 0) {
-                        WidgetsBinding.instance.addPostFrameCallback((_) {
-                          _initializeZoom();
-                        });
+                        WidgetsBinding.instance.addPostFrameCallback(
+                          (_) => _initializeZoom(),
+                        );
                       }
-
                       return Container(
                         decoration: BoxDecoration(
                           color: Theme.of(context).cardColor,
@@ -318,27 +325,6 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _buildToggles(Color color) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        _toggleCheck(
-          "Solar",
-          Colors.orange,
-          _showPV,
-          (v) => setState(() => _showPV = v!),
-        ),
-        const SizedBox(width: 24),
-        _toggleCheck(
-          "Load",
-          color,
-          _showLoad,
-          (v) => setState(() => _showLoad = v!),
-        ),
-      ],
-    );
-  }
-
   Widget _miniStat(String label, String val, IconData icon, Color col) {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 4),
@@ -372,6 +358,27 @@ class _DashboardPageState extends State<DashboardPage> {
           ),
         ],
       ),
+    );
+  }
+
+  Widget _buildToggles(Color color) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _toggleCheck(
+          "Solar",
+          Colors.orange,
+          _showPV,
+          (v) => setState(() => _showPV = v!),
+        ),
+        const SizedBox(width: 24),
+        _toggleCheck(
+          "Load",
+          color,
+          _showLoad,
+          (v) => setState(() => _showLoad = v!),
+        ),
+      ],
     );
   }
 
