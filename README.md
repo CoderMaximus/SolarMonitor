@@ -112,7 +112,10 @@ Success! If you see `/dev/inverter_1 -> hidraw4`, you can now use `/dev/inverter
 
 
 # IMPORTANT: Known Bugs 🐜:
-  • PV Power might spike(27000W or something like that) it's probably due to wrong readings from the inverter.
+  • ~~PV Power might spike(27000W or something like that) it's probably due to wrong readings from the inverter.~~(FIXED)
+
+  • ~~System Default theme not working.~~(FIXED)
+  
 
 
 
