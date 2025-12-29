@@ -39,7 +39,7 @@ class _DashboardPageState extends State<DashboardPage> {
     double calculatedScale = 1440 / visibleMinutes;
     setState(() {
       _transformationController.value = Matrix4.identity()
-        ..scale(calculatedScale, 1.0, 1.0);
+        ..scaleByDouble(calculatedScale, 1.0, 1.0, 1.0);
       _hasInitialized = true;
     });
   }
@@ -57,7 +57,6 @@ class _DashboardPageState extends State<DashboardPage> {
     super.dispose();
   }
 
-  // Matching the parsing logic from your Detail Page
   double _parse(dynamic val) {
     if (val == null) return 0.0;
     String s = val.toString().replaceAll(RegExp(r'[^0-9.]'), '');
@@ -65,11 +64,13 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   Future<void> _fetchHistory() async {
-    final p = context.read<ThemeProvider>();
-    if (_isFetchingHistory || p.rustIp.isEmpty) return;
+    final provider = context.read<ThemeProvider>();
+    if (_isFetchingHistory || provider.rustIp.isEmpty) return;
     setState(() => _isFetchingHistory = true);
     try {
-      final res = await http.get(Uri.parse("http://${p.rustIp}:3000/history"));
+      final res = await http.get(
+        Uri.parse("http://${provider.rustIp}:3000/history"),
+      );
       if (res.statusCode == 200) {
         final List<dynamic> data = jsonDecode(res.body);
         final List<FlSpot> tempLoad = [];
@@ -87,7 +88,7 @@ class _DashboardPageState extends State<DashboardPage> {
         });
       }
     } catch (e) {
-      debugPrint("Fetch error: $e");
+      debugPrint("History error: $e");
     }
     setState(() => _isFetchingHistory = false);
   }
@@ -125,30 +126,22 @@ class _DashboardPageState extends State<DashboardPage> {
               );
               data.forEach((key, inv) {
                 final List<dynamic> raw = inv['raw_data'] ?? [];
-
-                // --- CORRECTED MAPPINGS TO MATCH DETAIL PAGE ---
-                if (raw.length > 28) {
-                  // PV1: Index 14 (Volts) * Index 25 (Amps)
+                if (raw.length >= 29) {
+                  // PV Indices based on 29-field length
                   final double pv1V = _parse(raw[14]);
                   final double pv1A = _parse(raw[25]);
-
-                  // PV2: Index 27 (Volts) * Index 28 (Amps)
                   final double pv2V = _parse(raw[27]);
                   final double pv2A = _parse(raw[28]);
 
                   totalPvWatts += (pv1V * pv1A) + (pv2V * pv2A);
-
-                  // Load: Index 9
                   totalLoadWatts += _parse(raw[9]);
                 }
-
-                // QED: Daily Energy
+                // FIXED: Rust already sends kWh, do not divide by 1000 here.
                 totalKwhToday +=
-                    (double.tryParse(inv['qed']?.toString() ?? "0") ?? 0) /
-                    1000.0;
+                    double.tryParse(inv['qed']?.toString() ?? "0") ?? 0.0;
               });
             } catch (e) {
-              debugPrint("Processing error: $e");
+              debugPrint("Stream error: $e");
             }
           }
 
@@ -178,17 +171,6 @@ class _DashboardPageState extends State<DashboardPage> {
                         );
                       }
                       return Container(
-                        decoration: BoxDecoration(
-                          color: Theme.of(context).cardColor,
-                          borderRadius: BorderRadius.circular(28),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withValues(alpha: 0.05),
-                              blurRadius: 10,
-                              offset: const Offset(0, 4),
-                            ),
-                          ],
-                        ),
                         padding: const EdgeInsets.fromLTRB(5, 20, 15, 10),
                         child: LineChart(
                           transformationConfig: FlTransformationConfig(
@@ -205,7 +187,6 @@ class _DashboardPageState extends State<DashboardPage> {
                     },
                   ),
                 ),
-                const SizedBox(height: 12),
               ],
             ),
           );
@@ -220,27 +201,10 @@ class _DashboardPageState extends State<DashboardPage> {
       maxX: 1440,
       minY: 0,
       maxY: 16000,
-      lineTouchData: LineTouchData(
-        touchTooltipData: LineTouchTooltipData(
-          getTooltipColor: (spot) => Colors.blueGrey.withValues(alpha: 0.9),
-          getTooltipItems: (touchedSpots) {
-            return touchedSpots.map((spot) {
-              return LineTooltipItem(
-                "${spot.y.toInt()} W",
-                TextStyle(color: spot.bar.color, fontWeight: FontWeight.bold),
-              );
-            }).toList();
-          },
-        ),
-      ),
       gridData: FlGridData(
         show: true,
-        verticalInterval: 30,
+        verticalInterval: 60,
         horizontalInterval: 4000,
-        getDrawingHorizontalLine: (v) =>
-            FlLine(color: Colors.grey.withValues(alpha: 0.05), strokeWidth: 1),
-        getDrawingVerticalLine: (v) =>
-            FlLine(color: Colors.grey.withValues(alpha: 0.08), strokeWidth: 1),
       ),
       titlesData: FlTitlesData(
         topTitles: const AxisTitles(),
@@ -251,26 +215,19 @@ class _DashboardPageState extends State<DashboardPage> {
             reservedSize: 40,
             getTitlesWidget: (v, m) => Text(
               "${(v / 1000).toInt()}k",
-              style: const TextStyle(fontSize: 10, color: Colors.grey),
+              style: const TextStyle(fontSize: 10),
             ),
           ),
         ),
         bottomTitles: AxisTitles(
           sideTitles: SideTitles(
             showTitles: true,
-            interval: 30,
+            interval: 120,
             getTitlesWidget: (v, m) {
-              if (v < 0 || v > 1440) return const SizedBox();
-              int totalMinutes = v.toInt();
-              int hour = totalMinutes ~/ 60;
-              int minute = totalMinutes % 60;
-              return SideTitleWidget(
-                meta: m,
-                space: 8,
-                child: Text(
-                  "${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}",
-                  style: const TextStyle(fontSize: 8, color: Colors.grey),
-                ),
+              int h = v.toInt() ~/ 60;
+              return Text(
+                "${h.toString().padLeft(2, '0')}:00",
+                style: const TextStyle(fontSize: 9),
               );
             },
           ),
@@ -327,11 +284,10 @@ class _DashboardPageState extends State<DashboardPage> {
 
   Widget _miniStat(String label, String val, IconData icon, Color col) {
     return Container(
-      padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 4),
+      padding: const EdgeInsets.symmetric(vertical: 16),
       decoration: BoxDecoration(
         color: col.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: col.withValues(alpha: 0.15)),
       ),
       child: Column(
         children: [
@@ -345,15 +301,12 @@ class _DashboardPageState extends State<DashboardPage> {
               color: col.withValues(alpha: 0.7),
             ),
           ),
-          FittedBox(
-            fit: BoxFit.scaleDown,
-            child: Text(
-              val,
-              style: TextStyle(
-                fontSize: 19,
-                fontWeight: FontWeight.w900,
-                color: col,
-              ),
+          Text(
+            val,
+            style: TextStyle(
+              fontSize: 19,
+              fontWeight: FontWeight.w900,
+              color: col,
             ),
           ),
         ],
@@ -382,29 +335,18 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _toggleCheck(
-    String label,
-    Color col,
-    bool val,
-    Function(bool?) onChanged,
-  ) {
-    return Row(
-      children: [
-        Checkbox(
-          value: val,
-          onChanged: onChanged,
-          activeColor: col,
-          visualDensity: VisualDensity.compact,
-        ),
-        Text(
-          label,
-          style: TextStyle(
-            color: col,
-            fontWeight: FontWeight.bold,
-            fontSize: 13,
-          ),
-        ),
-      ],
-    );
-  }
+  Widget _toggleCheck(String l, Color c, bool v, Function(bool?) o) => Row(
+    children: [
+      Checkbox(
+        value: v,
+        onChanged: o,
+        activeColor: c,
+        visualDensity: VisualDensity.compact,
+      ),
+      Text(
+        l,
+        style: TextStyle(color: c, fontWeight: FontWeight.bold, fontSize: 13),
+      ),
+    ],
+  );
 }

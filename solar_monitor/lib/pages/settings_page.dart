@@ -71,15 +71,12 @@ class _SettingsPageState extends State<SettingsPage> {
             icon: const Icon(Icons.sync_rounded),
             label: const Text("Apply Network Changes"),
           ),
-
           const SizedBox(height: 32),
           _sectionHeader("Appearance"),
           const SizedBox(height: 12),
-
           _buildSleekCard(
             child: Column(
               children: [
-                // Theme Dropdown
                 _buildSleekDropdown<String>(
                   label: "Theme Mode",
                   icon: Icons.palette_outlined,
@@ -95,7 +92,6 @@ class _SettingsPageState extends State<SettingsPage> {
                   onChanged: (val) => p.changeTheme(val!),
                 ),
                 const Divider(height: 1, indent: 50),
-                // Color Seed Dropdown
                 _buildSleekDropdown<String>(
                   label: "Accent Color",
                   icon: Icons.colorize_rounded,
@@ -113,7 +109,6 @@ class _SettingsPageState extends State<SettingsPage> {
               ],
             ),
           ),
-
           const SizedBox(height: 40),
           const Center(
             child: Opacity(
@@ -129,8 +124,6 @@ class _SettingsPageState extends State<SettingsPage> {
       ),
     );
   }
-
-  // --- UI COMPONENTS ---
 
   Widget _sectionHeader(String text) {
     return Padding(

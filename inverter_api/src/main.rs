@@ -1,3 +1,4 @@
+// main.rs
 #[macro_use]
 extern crate lazy_static;
 
@@ -25,8 +26,8 @@ struct InverterState {
 #[derive(Serialize, Clone, Debug)]
 struct HistoryPoint {
     x: u32,
-    pv: f32,   // We calculate this in the recorder loop using V*I
-    load: f32, // We calculate this using V*I or raw active power
+    pv: f32,
+    load: f32,
 }
 
 type SharedState = Arc<RwLock<HashMap<u8, InverterState>>>;
@@ -40,8 +41,9 @@ async fn main() {
     let state: SharedState = Arc::new(RwLock::new(HashMap::new()));
     let ws_state = Arc::clone(&state);
 
-    println!("🚀 Server Online: Raw Data Streaming Mode");
+    println!("🚀 PI30MAX Server Online | Port 3000 (REST) | Port 3001 (WS)");
 
+    // Hardware Workers
     let master_s = Arc::clone(&state);
     thread::spawn(move || hardware_worker(master_s, "/dev/inverter_master", "Master", 1));
 
@@ -63,40 +65,27 @@ async fn main() {
                 {
                     let lock = history_state.read().unwrap();
                     for (_, inv) in lock.iter() {
-                        let raw = &inv.raw_data;
-                        if raw.len() > 14 {
-                            // PV1: Volts (11) * Amps (12)
-                            let v1 = raw
-                                .get(11)
-                                .and_then(|s| s.parse::<f32>().ok())
-                                .unwrap_or(0.0);
-                            let a1 = raw
-                                .get(12)
-                                .and_then(|s| s.parse::<f32>().ok())
-                                .unwrap_or(0.0);
-                            // PV2: Volts (14) * Amps (15) -- Adjust indices if needed for your specific card
-                            let v2 = raw
-                                .get(14)
-                                .and_then(|s| s.parse::<f32>().ok())
-                                .unwrap_or(0.0);
-                            let a2 = raw
-                                .get(15)
-                                .and_then(|s| s.parse::<f32>().ok())
-                                .unwrap_or(0.0);
+                        let fields = &inv.raw_data;
+                        if fields.len() >= 29 {
+                            // PV1: Index 14 (V) and Index 25 (A)
+                            let v1 = fields[14].parse::<f32>().unwrap_or(0.0);
+                            let a1 = fields[25].parse::<f32>().unwrap_or(0.0);
+                            
+                            // PV2: Index 27 (V) and Index 28 (A)
+                            let v2 = fields[27].parse::<f32>().unwrap_or(0.0);
+                            let a2 = fields[28].parse::<f32>().unwrap_or(0.0);
+
+                            // Load: Index 9 (Active Power in Watts)
+                            let load = fields[9].parse::<f32>().unwrap_or(0.0);
 
                             total_pv += (v1 * a1) + (v2 * a2);
-                            total_load += raw
-                                .get(9)
-                                .and_then(|s| s.parse::<f32>().ok())
-                                .unwrap_or(0.0);
+                            total_load += load;
                         }
                     }
                 }
 
                 let mut h_lock = HISTORY.write().unwrap();
-                if current_min == 0 {
-                    h_lock.clear();
-                }
+                if current_min == 0 { h_lock.clear(); }
                 h_lock.push(HistoryPoint {
                     x: current_min as u32,
                     pv: total_pv,
@@ -108,11 +97,7 @@ async fn main() {
         }
     });
 
-    let app = Router::new().route(
-        "/history",
-        get(|| async { axum::Json(HISTORY.read().unwrap().clone()) }),
-    );
-
+    // WebSocket Server (Port 3001)
     tokio::spawn(async move {
         let listener = TcpListener::bind("0.0.0.0:3001").await.unwrap();
         while let Ok((stream, _)) = listener.accept().await {
@@ -121,15 +106,22 @@ async fn main() {
                 if let Ok(mut ws_stream) = accept_async(stream).await {
                     loop {
                         let data = state_ref.read().unwrap().clone();
-                        let _ = ws_stream
-                            .send(Message::Text(serde_json::to_string(&data).unwrap().into()))
-                            .await;
-                        tokio::time::sleep(Duration::from_millis(800)).await;
+                        let json = serde_json::to_string(&data).unwrap();
+                        if ws_stream.send(Message::Text(json.into())).await.is_err() {
+                            break; 
+                        }
+                        tokio::time::sleep(Duration::from_millis(1000)).await;
                     }
                 }
             });
         }
     });
+
+    // REST API (Port 3000)
+    let app = Router::new().route(
+        "/history",
+        get(|| async { axum::Json(HISTORY.read().unwrap().clone()) }),
+    );
 
     axum::serve(TcpListener::bind("0.0.0.0:3000").await.unwrap(), app)
         .await
@@ -138,103 +130,106 @@ async fn main() {
 
 fn hardware_worker(state: SharedState, path: &str, label: &str, id: u8) {
     let api = HidApi::new().expect("HID Init Fail");
-    let mut last_qed = Instant::now() - Duration::from_secs(600);
-    let mut qed_val = String::from("0.0");
+    let mut last_qed_query = Instant::now() - Duration::from_secs(600);
+    let mut cached_qed = String::from("0.00");
+
     loop {
         if let Ok(dev) = api.open_path(&std::ffi::CString::new(path).unwrap()) {
-            if let Some(fields) = query_and_parse(&dev, &format!("QPGS{}", id), false) {
-                if last_qed.elapsed() > Duration::from_secs(300) {
+            // 1. Get Main Parallel Data (QPGS)
+            if let Some(fields) = query_and_parse_safe(&dev, &format!("QPGS{}", id)) {
+                
+                // 2. Periodic Energy Query (QED) - Dedicated Fix for Slave
+                if last_qed_query.elapsed() > Duration::from_secs(300) {
                     let date = Local::now().format("%Y%m%d").to_string();
-                    if let Some(q) = query_and_parse(&dev, &format!("QED{}", date), true) {
-                        qed_val = q.first().cloned().unwrap_or(qed_val);
-                        last_qed = Instant::now();
+                    let qed_cmd = format!("QED{}", date);
+                    
+                    if let Some(resp_bytes) = send_and_receive_raw(&dev, &qed_cmd) {
+                        let start_pos = resp_bytes.iter().position(|&b| b == 0x28).map(|i| i + 1).unwrap_or(0);
+                        let end_pos = resp_bytes.iter().position(|&b| b == 0x0D).unwrap_or(resp_bytes.len());
+                        
+                        if end_pos > start_pos {
+                            let clean_data = String::from_utf8_lossy(&resp_bytes[start_pos..end_pos]);
+                            // take_while ensures we stop at the end of the energy number
+                            let numeric_part: String = clean_data.chars()
+                                .take_while(|c| c.is_numeric())
+                                .collect();
+
+                            if let Ok(wh_val) = numeric_part.parse::<f64>() {
+                                cached_qed = format!("{:.2}", wh_val / 1000.0);
+                                last_qed_query = Instant::now();
+                            }
+                        }
                     }
                 }
+
+                // 3. Update Shared State
                 state.write().unwrap().insert(
                     id,
                     InverterState {
                         label: label.to_string(),
                         raw_data: fields,
-                        qed: qed_val.clone(),
-                        last_update: format!("{:?}", Instant::now()),
+                        qed: cached_qed.clone(),
+                        last_update: Local::now().format("%H:%M:%S").to_string(),
                     },
                 );
             }
         }
-        thread::sleep(Duration::from_millis(500));
+        // Small delay to prevent CPU pinning
+        thread::sleep(Duration::from_millis(2000));
     }
 }
 
-pub fn query_and_parse(device: &HidDevice, command: &str, sanitize: bool) -> Option<Vec<String>> {
-    let raw = send_and_receive(device, command)?;
-    let clean = raw.trim_start_matches('(').split('\r').next()?;
-    let processed = if sanitize {
-        clean
-            .chars()
-            .filter(|c| c.is_numeric() || *c == '.' || c.is_whitespace())
-            .collect()
-    } else {
-        clean.to_string()
-    };
+pub fn query_and_parse_safe(device: &HidDevice, command: &str) -> Option<Vec<String>> {
+    let resp_bytes = send_and_receive_raw(device, command)?;
+    let start_pos = resp_bytes.iter().position(|&b| b == 0x28).map(|i| i + 1).unwrap_or(0);
+    let end_pos = resp_bytes.iter().position(|&b| b == 0x0D).unwrap_or(resp_bytes.len());
+    let data_end = if end_pos > 2 { end_pos - 2 } else { end_pos }; 
+
+    if data_end <= start_pos { return None; }
+    let clean_str = String::from_utf8_lossy(&resp_bytes[start_pos..data_end]);
+    
     Some(
-        processed
+        clean_str
             .split_whitespace()
-            .map(|s| s.to_string())
+            .map(|s| s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.').collect())
             .collect(),
     )
 }
 
-fn send_and_receive(device: &HidDevice, cmd: &str) -> Option<String> {
+fn send_and_receive_raw(device: &HidDevice, cmd: &str) -> Option<Vec<u8>> {
     let mut buf = [0u8; 64];
-    while let Ok(len) = device.read_timeout(&mut buf, 1) {
-        if len == 0 {
-            break;
-        }
-    }
+    while let Ok(len) = device.read_timeout(&mut buf, 10) { if len == 0 { break; } }
+
     let mut bytes = cmd.as_bytes().to_vec();
     let mut crc: u16 = 0;
-    let table: [u16; 16] = [
-        0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7, 0x8108, 0x9129, 0xa14a,
-        0xb16b, 0xc18c, 0xd1ad, 0xe1ce, 0xf1ef,
-    ];
+    let table: [u16; 16] = [0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7, 0x8108, 0x9129, 0xa14a, 0xb16b, 0xc18c, 0xd1ad, 0xe1ce, 0xf1ef];
     for &b in &bytes {
         let mut da = ((crc >> 8) >> 4) as u8;
-        crc <<= 4;
-        da ^= b >> 4;
-        crc ^= table[da as usize];
+        crc <<= 4; da ^= b >> 4; crc ^= table[da as usize];
         da = ((crc >> 8) >> 4) as u8;
-        crc <<= 4;
-        da ^= b & 0x0f;
-        crc ^= table[da as usize];
+        crc <<= 4; da ^= b & 0x0f; crc ^= table[da as usize];
     }
     let (mut low, mut high) = ((crc & 0xff) as u8, (crc >> 8) as u8);
-    if [0x28, 0x0d, 0x0a].contains(&low) {
-        low += 1;
-    }
-    if [0x28, 0x0d, 0x0a].contains(&high) {
-        high += 1;
-    }
-    bytes.push(high);
-    bytes.push(low);
-    bytes.push(0x0D);
+    if [0x28, 0x0d, 0x0a].contains(&low) { low += 1; }
+    if [0x28, 0x0d, 0x0a].contains(&high) { high += 1; }
+    bytes.push(high); bytes.push(low); bytes.push(0x0D);
+
     for chunk in bytes.chunks(8) {
-        let mut block = [0u8; 8];
-        block[..chunk.len()].copy_from_slice(chunk);
+        let mut block = [0u8; 9];
+        block[1..chunk.len()+1].copy_from_slice(chunk);
         let _ = device.write(&block);
     }
+
     let mut resp = Vec::new();
     let start = Instant::now();
     while start.elapsed() < Duration::from_millis(1500) {
         let mut b = [0u8; 64];
-        if let Ok(l) = device.read_timeout(&mut b, 20) {
+        if let Ok(l) = device.read_timeout(&mut b, 50) {
             if l > 0 {
                 resp.extend_from_slice(&b[..l]);
-                if resp.contains(&0x0D) {
-                    break;
-                }
+                if resp.contains(&0x0D) { break; }
             }
         }
     }
-    let s = String::from_utf8_lossy(&resp).to_string();
-    s.find('(').map(|i| s[i..].to_string())
+    if resp.is_empty() { None } else { Some(resp) }
 }

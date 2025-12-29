@@ -26,10 +26,12 @@ class TilesPage extends StatelessWidget {
       body: StreamBuilder(
         stream: channel.stream,
         builder: (context, snapshot) {
-          if (snapshot.hasError)
+          if (snapshot.hasError) {
             return const Center(child: Text("Connection Error"));
-          if (!snapshot.hasData)
+          }
+          if (!snapshot.hasData) {
             return const Center(child: CircularProgressIndicator());
+          }
 
           // The Rust server sends a Map: {"1": {...}, "2": {...}}
           Map<String, dynamic> unitsMap = jsonDecode(snapshot.data);

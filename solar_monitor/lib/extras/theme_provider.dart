@@ -12,8 +12,17 @@ class ThemeProvider with ChangeNotifier {
   String rustPort = '';
   bool isInitialized = false;
 
-  ThemeMode get themeMode =>
-      currentTheme == 'light' ? ThemeMode.light : ThemeMode.dark;
+  // FIXED: Logic to handle 'system' mode correctly
+  ThemeMode get themeMode {
+    switch (currentTheme) {
+      case 'light':
+        return ThemeMode.light;
+      case 'dark':
+        return ThemeMode.dark;
+      default:
+        return ThemeMode.system;
+    }
+  }
 
   Color get seedColor => switch (currentSeed) {
     'green' => Colors.green,
@@ -24,7 +33,6 @@ class ThemeProvider with ChangeNotifier {
     _ => Colors.blue,
   };
 
-  // WebSocket URL helper
   String get wsUrl => "ws://$rustIp:$rustPort";
 
   Future<void> updateNetwork(String ip, String port) async {
@@ -54,8 +62,7 @@ class ThemeProvider with ChangeNotifier {
     final prefs = await SharedPreferences.getInstance();
     currentTheme = prefs.getString('theme') ?? 'dark';
     currentSeed = prefs.getString('seed') ?? 'blue';
-    rustIp =
-        prefs.getString('rustIp') ?? '192.168.1.100'; // Fallback if never saved
+    rustIp = prefs.getString('rustIp') ?? '192.168.1.100';
     rustPort = prefs.getString('rustPort') ?? '3001';
     isInitialized = true;
     notifyListeners();

@@ -14,11 +14,14 @@ void main() => runApp(
 
 class InverterApp extends StatelessWidget {
   const InverterApp({super.key});
+
   @override
   Widget build(BuildContext context) {
     final p = context.watch<ThemeProvider>();
+
     return MaterialApp(
       debugShowCheckedModeBanner: false,
+      // System mode now works because p.themeMode handles 'system'
       themeMode: p.themeMode,
       theme: ThemeData(
         useMaterial3: true,

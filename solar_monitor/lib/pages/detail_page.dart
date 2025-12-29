@@ -68,8 +68,9 @@ class _InverterDetailPageState extends State<InverterDetailPage>
         stream: _unitStream,
         initialData: widget.initialData,
         builder: (context, snapshot) {
-          if (!snapshot.hasData)
+          if (!snapshot.hasData) {
             return const Center(child: CircularProgressIndicator());
+          }
 
           final inv = snapshot.data;
           final List<dynamic> raw = inv['raw_data'];
@@ -409,8 +410,9 @@ class SolidFlowPainter extends CustomPainter {
           e = center;
         }
       }
-      if (s != null && e != null)
+      if (s != null && e != null) {
         canvas.drawCircle(Offset.lerp(s, e, progress)!, 4, pBub);
+      }
     });
   }
 
