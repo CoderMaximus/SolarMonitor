@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:google_nav_bar/google_nav_bar.dart'; // Add this import
 import 'extras/theme_provider.dart';
 import 'pages/tiles_page.dart';
 import 'pages/settings_page.dart';
@@ -21,7 +22,6 @@ class InverterApp extends StatelessWidget {
 
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      // System mode now works because p.themeMode handles 'system'
       themeMode: p.themeMode,
       theme: ThemeData(
         useMaterial3: true,
@@ -55,25 +55,52 @@ class _MainEntryPageState extends State<MainEntryPage> {
 
   @override
   Widget build(BuildContext context) {
+    final p = context.watch<ThemeProvider>();
+    final color = p.seedColor;
+
     return Scaffold(
       body: _pages[_currentIndex],
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _currentIndex,
-        onDestinationSelected: (i) => setState(() => _currentIndex = i),
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            label: 'Dashboard',
+      // Container wrapper provides the background and shadow for the nav bar
+      bottomNavigationBar: Container(
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surface,
+          boxShadow: [
+            BoxShadow(
+              blurRadius: 20,
+              color: Colors.black.withValues(alpha: .1),
+            ),
+          ],
+        ),
+        child: SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14.0, vertical: 8),
+            child: GNav(
+              rippleColor: color.withValues(alpha: 0.3),
+              hoverColor: color.withValues(alpha: 0.1),
+              haptic: true,
+              tabBorderRadius: 20,
+              curve: Curves.easeInCirc,
+              duration: const Duration(milliseconds: 300),
+              gap: 8,
+              color: Theme.of(context).hintColor,
+              activeColor: color,
+              iconSize: 24,
+              tabBackgroundColor: color.withValues(alpha: 0.1),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              selectedIndex: _currentIndex,
+              onTabChange: (index) {
+                setState(() {
+                  _currentIndex = index;
+                });
+              },
+              tabs: const [
+                GButton(icon: Icons.dashboard_outlined, text: 'Dashboard'),
+                GButton(icon: Icons.power_outlined, text: 'Units'),
+                GButton(icon: Icons.settings_outlined, text: 'Config'),
+              ],
+            ),
           ),
-          NavigationDestination(
-            icon: Icon(Icons.power_outlined),
-            label: 'Units',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_outlined),
-            label: 'Config',
-          ),
-        ],
+        ),
       ),
     );
   }

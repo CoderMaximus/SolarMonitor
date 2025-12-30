@@ -49,6 +49,7 @@ dependencies:
   http: ^1.6.0
   syncfusion_flutter_charts: ^32.1.20
   flutter_launcher_icons: ^0.14.4
+  google_nav_bar: ^5.0.7
 
 dev_dependencies:
   flutter_test:
