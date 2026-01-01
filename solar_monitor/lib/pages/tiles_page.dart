@@ -149,8 +149,9 @@ class _TilesPageState extends State<TilesPage> {
                   final Map<String, dynamic> unitsMap = jsonDecode(
                     snapshot.data.toString(),
                   );
-                  if (unitsMap.isEmpty)
+                  if (unitsMap.isEmpty) {
                     return const Center(child: Text("No units detected."));
+                  }
 
                   final sortedIds = unitsMap.keys.toList()
                     ..sort((a, b) => int.parse(a).compareTo(int.parse(b)));
