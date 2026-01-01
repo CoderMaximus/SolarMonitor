@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:google_nav_bar/google_nav_bar.dart'; // Add this import
+import 'package:google_nav_bar/google_nav_bar.dart';
 import 'extras/theme_provider.dart';
 import 'pages/tiles_page.dart';
 import 'pages/settings_page.dart';
-import 'pages/dashboard_page.dart';
+import 'pages/graph_page.dart';
+import 'alt/alt_dashboard.dart';
 
 void main() => runApp(
   ChangeNotifierProvider(
@@ -45,22 +46,53 @@ class MainEntryPage extends StatefulWidget {
 }
 
 class _MainEntryPageState extends State<MainEntryPage> {
-  int _currentIndex = 1;
+  int _currentIndex = 0;
 
-  final List<Widget> _pages = [
-    const DashboardPage(),
-    const TilesPage(),
-    const SettingsPage(),
-  ];
+  late PageController _pageController;
+
+  @override
+  void initState() {
+    super.initState();
+    _pageController = PageController(initialPage: _currentIndex);
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     final p = context.watch<ThemeProvider>();
     final color = p.seedColor;
 
+    final List<Widget> pages = p.uiMode == 'standard'
+        ? [const GraphPage(), const TilesPage(), const SettingsPage()]
+        : [const AltDashboard(), const GraphPage(), const SettingsPage()];
+
+    final List<GButton> tabs = p.uiMode == 'standard'
+        ? const [
+            GButton(icon: Icons.dashboard_rounded, text: 'Dashboard'),
+            GButton(icon: Icons.power_rounded, text: 'Units'),
+            GButton(icon: Icons.settings_rounded, text: 'Settings'),
+          ]
+        : const [
+            GButton(icon: Icons.bolt_rounded, text: 'Live'),
+            GButton(icon: Icons.analytics_rounded, text: 'Statistics'),
+            GButton(icon: Icons.settings_rounded, text: 'Settings'),
+          ];
+
     return Scaffold(
-      body: _pages[_currentIndex],
-      // Container wrapper provides the background and shadow for the nav bar
+      body: PageView(
+        controller: _pageController,
+        onPageChanged: (index) {
+          setState(() {
+            _currentIndex = index;
+          });
+        },
+        children: pages,
+      ),
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
           color: Theme.of(context).colorScheme.surface,
@@ -79,8 +111,8 @@ class _MainEntryPageState extends State<MainEntryPage> {
               hoverColor: color.withValues(alpha: 0.1),
               haptic: true,
               tabBorderRadius: 20,
-              curve: Curves.easeInCirc,
-              duration: const Duration(milliseconds: 300),
+              curve: Curves.easeInOutCubic,
+              duration: const Duration(milliseconds: 250),
               gap: 8,
               color: Theme.of(context).hintColor,
               activeColor: color,
@@ -92,12 +124,13 @@ class _MainEntryPageState extends State<MainEntryPage> {
                 setState(() {
                   _currentIndex = index;
                 });
+                _pageController.animateToPage(
+                  index,
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeInOutCubic,
+                );
               },
-              tabs: const [
-                GButton(icon: Icons.dashboard_outlined, text: 'Dashboard'),
-                GButton(icon: Icons.power_outlined, text: 'Units'),
-                GButton(icon: Icons.settings_outlined, text: 'Config'),
-              ],
+              tabs: tabs,
             ),
           ),
         ),
