@@ -5,23 +5,23 @@ import 'package:http/http.dart' as http;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:provider/provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:intl/intl.dart';
 import '../extras/theme_provider.dart';
 
-class DashboardPage extends StatefulWidget {
-  const DashboardPage({super.key});
+class GraphPage extends StatefulWidget {
+  const GraphPage({super.key});
 
   @override
-  State<DashboardPage> createState() => _DashboardPageState();
+  State<GraphPage> createState() => _GraphPageState();
 }
 
-class _DashboardPageState extends State<DashboardPage> {
+class _GraphPageState extends State<GraphPage> {
   final List<FlSpot> _loadSpots = [];
   final List<FlSpot> _pvSpots = [];
   bool _isFetchingHistory = false;
   bool _showPV = true;
   bool _showLoad = true;
 
-  // This flag controls if we should auto-snap to "Now"
   bool _hasJumpedOnce = false;
   bool _hasInitialized = false;
 
@@ -30,29 +30,35 @@ class _DashboardPageState extends State<DashboardPage> {
   final double leftReservedSize = 40.0;
 
   WebSocketChannel? _channel;
+  StreamSubscription? _wsSubscription;
   Timer? _refreshTimer;
   late TransformationController _transformationController;
   final GlobalKey _chartKey = GlobalKey();
+
+  final _formatter = NumberFormat("#,##0", "en_US");
+
+  double _currentPV = 0;
+  double _currentLoad = 0;
+  double _currentQed = 0;
 
   @override
   void initState() {
     super.initState();
     _transformationController = TransformationController();
-    _connectWebSocket();
     _fetchHistory();
+    _connectWebSocket();
     _startAutoRefresh();
   }
 
   void _startAutoRefresh() {
     _refreshTimer?.cancel();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 60), (timer) {
+    _refreshTimer = Timer.periodic(const Duration(minutes: 5), (timer) {
       _fetchHistory(shouldJump: false);
     });
   }
 
   void _jumpToCurrentTime() {
     if (!mounted) return;
-
     final RenderBox? box =
         _chartKey.currentContext?.findRenderObject() as RenderBox?;
     if (box == null || box.size.width <= 0) return;
@@ -83,11 +89,66 @@ class _DashboardPageState extends State<DashboardPage> {
   void _connectWebSocket() {
     final p = context.read<ThemeProvider>();
     if (p.rustIp.isEmpty) return;
-    _channel = WebSocketChannel.connect(Uri.parse("ws://${p.rustIp}:3001"));
+
+    try {
+      _channel = WebSocketChannel.connect(Uri.parse("ws://${p.rustIp}:3001"));
+      _wsSubscription = _channel?.stream.listen(
+        (message) => _handleIncomingData(message),
+        onError: (err) {
+          debugPrint("WS Error: $err");
+          Future.delayed(const Duration(seconds: 5), _connectWebSocket);
+        },
+        onDone: () =>
+            Future.delayed(const Duration(seconds: 5), _connectWebSocket),
+      );
+    } catch (e) {
+      debugPrint("WS Connection Error: $e");
+    }
+  }
+
+  void _handleIncomingData(dynamic message) {
+    try {
+      final data = jsonDecode(message.toString());
+      double newPV = 0, newLoad = 0, newQed = 0;
+
+      data.forEach((k, v) {
+        final raw = v['raw_data'] ?? [];
+        if (raw.length >= 29) {
+          newPV +=
+              (_parse(raw[14]) * _parse(raw[25])) +
+              (_parse(raw[27]) * _parse(raw[28]));
+          newLoad += _parse(raw[9]);
+        }
+        newQed += _parse(v['qed']);
+      });
+
+      final now = DateTime.now();
+      final double x = (now.hour * 60 + now.minute).toDouble();
+
+      if (mounted) {
+        setState(() {
+          _currentPV = newPV;
+          _currentLoad = newLoad;
+          _currentQed = newQed;
+
+          if (_pvSpots.isEmpty || _pvSpots.last.x != x) {
+            _pvSpots.add(FlSpot(x, newPV));
+            _loadSpots.add(FlSpot(x, newLoad));
+            if (_pvSpots.length > 2000) {
+              _pvSpots.removeAt(0);
+              _loadSpots.removeAt(0);
+            }
+          }
+        });
+      }
+    } catch (e) {
+      debugPrint("Data handling error: $e");
+    }
   }
 
   @override
   void dispose() {
+    _wsSubscription?.cancel();
     _channel?.sink.close();
     _refreshTimer?.cancel();
     _transformationController.dispose();
@@ -116,13 +177,15 @@ class _DashboardPageState extends State<DashboardPage> {
           tLoad.add(FlSpot(x, (pt['load'] as num).toDouble()));
           tPv.add(FlSpot(x, (pt['pv'] as num).toDouble()));
         }
+        tLoad.sort((a, b) => a.x.compareTo(b.x));
+        tPv.sort((a, b) => a.x.compareTo(b.x));
+
         if (mounted) {
           setState(() {
             _loadSpots.clear();
             _pvSpots.clear();
             _loadSpots.addAll(tLoad);
             _pvSpots.addAll(tPv);
-
             if (shouldJump || !_hasJumpedOnce) {
               WidgetsBinding.instance.addPostFrameCallback(
                 (_) => _jumpToCurrentTime(),
@@ -151,7 +214,7 @@ class _DashboardPageState extends State<DashboardPage> {
       appBar: AppBar(
         title: const Text(
           "System Dashboard",
-          style: TextStyle(fontWeight: FontWeight.bold),
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 22),
         ),
         centerTitle: true,
         actions: [
@@ -161,73 +224,49 @@ class _DashboardPageState extends State<DashboardPage> {
             tooltip: "Jump to Now",
           ),
           IconButton(
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(Icons.refresh_rounded),
             onPressed: _manualRefresh,
+            tooltip: "Refresh Data",
           ),
         ],
       ),
-      body: StreamBuilder(
-        stream: _channel?.stream,
-        builder: (context, snapshot) {
-          double pv = 0, load = 0, qed = 0;
-          if (snapshot.hasData) {
-            try {
-              final data = jsonDecode(snapshot.data.toString());
-              data.forEach((k, v) {
-                final raw = v['raw_data'] ?? [];
-                if (raw.length >= 29) {
-                  pv +=
-                      (_parse(raw[14]) * _parse(raw[25])) +
-                      (_parse(raw[27]) * _parse(raw[28]));
-                  load += _parse(raw[9]);
-                }
-                qed += _parse(v['qed']);
-              });
-            } catch (_) {}
-          }
-
-          return Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 12.0,
-              vertical: 8.0,
+      body: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 8.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildStatHeader(_currentPV, _currentLoad, _currentQed, color),
+            const SizedBox(height: 16),
+            _buildToggles(color),
+            const SizedBox(height: 8),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  if (!_hasInitialized && constraints.maxWidth > 0) {
+                    WidgetsBinding.instance.addPostFrameCallback(
+                      (_) => _jumpToCurrentTime(),
+                    );
+                  }
+                  return Container(
+                    key: _chartKey,
+                    padding: const EdgeInsets.fromLTRB(5, 20, 15, 10),
+                    child: LineChart(
+                      transformationConfig: FlTransformationConfig(
+                        scaleAxis: FlScaleAxis.horizontal,
+                        minScale: 1.0,
+                        maxScale: 25.0,
+                        panEnabled: true,
+                        scaleEnabled: true,
+                        transformationController: _transformationController,
+                      ),
+                      _mainChartData(color),
+                    ),
+                  );
+                },
+              ),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                _buildStatHeader(pv, load, qed, color),
-                const SizedBox(height: 16),
-                _buildToggles(color),
-                const SizedBox(height: 8),
-                Expanded(
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      if (!_hasInitialized && constraints.maxWidth > 0) {
-                        WidgetsBinding.instance.addPostFrameCallback(
-                          (_) => _jumpToCurrentTime(),
-                        );
-                      }
-                      return Container(
-                        key: _chartKey,
-                        padding: const EdgeInsets.fromLTRB(5, 20, 15, 10),
-                        child: LineChart(
-                          transformationConfig: FlTransformationConfig(
-                            scaleAxis: FlScaleAxis.horizontal,
-                            minScale: 1.0,
-                            maxScale: 25.0,
-                            panEnabled: true,
-                            scaleEnabled: true,
-                            transformationController: _transformationController,
-                          ),
-                          _mainChartData(color),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
+          ],
+        ),
       ),
     );
   }
@@ -235,21 +274,14 @@ class _DashboardPageState extends State<DashboardPage> {
   LineChartData _mainChartData(Color color) {
     return LineChartData(
       lineTouchData: LineTouchData(
-        // This ensures the tooltip stays when you let go
         handleBuiltInTouches: true,
-        touchCallback: (FlTouchEvent event, LineTouchResponse? response) {
-          // If the user lifts their finger or moves the mouse away,
-          // do nothing (don't clear the response) so the tooltip persists.
-        },
         touchTooltipData: LineTouchTooltipData(
-          // Optional: Makes the tooltip show even if the touch is slightly off
-          maxContentWidth: 100,
+          maxContentWidth: 120,
           getTooltipColor: (touchedSpot) => Colors.black.withValues(alpha: 0.8),
           getTooltipItems: (List<LineBarSpot> touchedSpots) {
             return touchedSpots.map((LineBarSpot touchedSpot) {
               final isSolar = touchedSpot.barIndex == 0;
               final textColor = isSolar ? Colors.green : color;
-
               final int totalMinutes = touchedSpot.x.toInt();
               final String hour = (totalMinutes ~/ 60).toString().padLeft(
                 2,
@@ -259,14 +291,10 @@ class _DashboardPageState extends State<DashboardPage> {
 
               return LineTooltipItem(
                 '$hour:$min\n',
-                const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                  fontWeight: FontWeight.normal,
-                ),
+                const TextStyle(color: Colors.white, fontSize: 10),
                 children: [
                   TextSpan(
-                    text: '${touchedSpot.y.toInt()} W',
+                    text: '${_formatter.format(touchedSpot.y)} W',
                     style: TextStyle(
                       color: textColor,
                       fontWeight: FontWeight.bold,
@@ -331,7 +359,7 @@ class _DashboardPageState extends State<DashboardPage> {
     spots: spots,
     isCurved: true,
     color: c,
-    barWidth: 1.5,
+    barWidth: 2.0,
     dotData: const FlDotData(show: false),
     belowBarData: BarAreaData(show: true, color: c.withValues(alpha: 0.05)),
   );
@@ -342,7 +370,7 @@ class _DashboardPageState extends State<DashboardPage> {
         Expanded(
           child: _miniStat(
             "Solar",
-            "${pv.toInt()}W",
+            "${_formatter.format(pv)}W",
             Icons.wb_sunny_rounded,
             Colors.green,
           ),
@@ -351,7 +379,7 @@ class _DashboardPageState extends State<DashboardPage> {
         Expanded(
           child: _miniStat(
             "Load",
-            "${load.toInt()}W",
+            "${_formatter.format(load)}W",
             Icons.bolt_rounded,
             color,
           ),
@@ -378,7 +406,7 @@ class _DashboardPageState extends State<DashboardPage> {
       ),
       child: Column(
         children: [
-          Icon(icon, color: col, size: 22),
+          Icon(icon, color: col, size: 24),
           const SizedBox(height: 6),
           Text(
             label,
@@ -393,7 +421,7 @@ class _DashboardPageState extends State<DashboardPage> {
             child: Text(
               val,
               style: TextStyle(
-                fontSize: 19,
+                fontSize: 20,
                 fontWeight: FontWeight.w900,
                 color: col,
               ),
