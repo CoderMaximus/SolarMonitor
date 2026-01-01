@@ -8,11 +8,11 @@ class ThemeProvider with ChangeNotifier {
 
   String currentTheme = 'dark';
   String currentSeed = 'blue';
+  String uiMode = 'standard';
   String rustIp = '';
   String rustPort = '';
   bool isInitialized = false;
 
-  // FIXED: Logic to handle 'system' mode correctly
   ThemeMode get themeMode {
     switch (currentTheme) {
       case 'light':
@@ -25,7 +25,6 @@ class ThemeProvider with ChangeNotifier {
   }
 
   Color get seedColor => switch (currentSeed) {
-    'green' => Colors.green,
     'cyan' => Colors.cyan,
     'purple' => Colors.purple,
     'indigo' => Colors.indigo,
@@ -58,10 +57,19 @@ class ThemeProvider with ChangeNotifier {
     notifyListeners();
   }
 
+  // New method for UI Mode
+  Future<void> changeUiMode(String mode) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('uiMode', mode);
+    uiMode = mode;
+    notifyListeners();
+  }
+
   Future<void> initialize() async {
     final prefs = await SharedPreferences.getInstance();
     currentTheme = prefs.getString('theme') ?? 'dark';
     currentSeed = prefs.getString('seed') ?? 'blue';
+    uiMode = prefs.getString('uiMode') ?? 'standard';
     rustIp = prefs.getString('rustIp') ?? '192.168.1.100';
     rustPort = prefs.getString('rustPort') ?? '3001';
     isInitialized = true;
