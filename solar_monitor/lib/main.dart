@@ -7,12 +7,15 @@ import 'pages/settings_page.dart';
 import 'pages/graph_page.dart';
 import 'alt/alt_dashboard.dart';
 
-void main() => runApp(
-  ChangeNotifierProvider(
-    create: (_) => ThemeProvider(),
-    child: const InverterApp(),
-  ),
-);
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  runApp(
+    ChangeNotifierProvider(
+      create: (_) => ThemeProvider(),
+      child: const InverterApp(),
+    ),
+  );
+}
 
 class InverterApp extends StatelessWidget {
   const InverterApp({super.key});
