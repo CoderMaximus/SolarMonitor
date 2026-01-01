@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:intl/intl.dart';
 import '../extras/theme_provider.dart';
 import '../extras/router.dart';
 import 'detail_page.dart';
@@ -15,32 +16,42 @@ class TilesPage extends StatefulWidget {
 
 class _TilesPageState extends State<TilesPage> {
   WebSocketChannel? _channel;
-  // Use a broadcast stream to ensure the listener doesn't hang
   Stream? _broadcastStream;
+  bool _isDisposed = false;
+
+  final _f = NumberFormat("#,##0", "en_US");
 
   @override
   void initState() {
     super.initState();
-    // We use a post-frame callback to ensure the context is ready
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _connect();
+      if (mounted && !_isDisposed) {
+        _connect();
+      }
     });
   }
 
+  String _formatVal(dynamic val, String unit) {
+    if (val == null) return "---";
+    String s = val.toString().replaceAll(RegExp(r'[^0-9.]'), '');
+    double? num = double.tryParse(s);
+    if (num == null) return "---";
+    return "${_f.format(num)}$unit";
+  }
+
   void _connect() {
-    final p = context.read<ThemeProvider>();
-    if (p.rustIp.isEmpty) return;
-
-    _cleanup(); // Close any old connections first
-
+    if (!mounted || _isDisposed) return;
     try {
+      final p = Provider.of<ThemeProvider>(context, listen: false);
+      if (p.rustIp.isEmpty) return;
+      _cleanup();
       final ws = WebSocketChannel.connect(Uri.parse(p.wsUrl));
-      setState(() {
-        _channel = ws;
-        // Converting to broadcast stream helps prevent "loading forever"
-        // because it allows multiple listeners and handles late subscribers better.
-        _broadcastStream = _channel!.stream.asBroadcastStream();
-      });
+      if (mounted && !_isDisposed) {
+        setState(() {
+          _channel = ws;
+          _broadcastStream = _channel!.stream.asBroadcastStream();
+        });
+      }
     } catch (e) {
       debugPrint("WS Connection Error: $e");
     }
@@ -53,16 +64,16 @@ class _TilesPageState extends State<TilesPage> {
   }
 
   void _refresh() {
-    setState(() {
-      _cleanup();
-    });
+    if (!mounted) return;
+    setState(() => _cleanup());
     Future.delayed(const Duration(milliseconds: 200), () {
-      if (mounted) _connect();
+      if (mounted && !_isDisposed) _connect();
     });
   }
 
   @override
   void dispose() {
+    _isDisposed = true;
     _cleanup();
     super.dispose();
   }
@@ -92,7 +103,6 @@ class _TilesPageState extends State<TilesPage> {
           : StreamBuilder(
               stream: _broadcastStream,
               builder: (context, snapshot) {
-                // Handle Errors
                 if (snapshot.hasError) {
                   return Center(
                     child: Column(
@@ -118,7 +128,6 @@ class _TilesPageState extends State<TilesPage> {
                   );
                 }
 
-                // Handle Loading/Waiting
                 if (snapshot.connectionState == ConnectionState.waiting ||
                     !snapshot.hasData) {
                   return const Center(
@@ -140,10 +149,8 @@ class _TilesPageState extends State<TilesPage> {
                   final Map<String, dynamic> unitsMap = jsonDecode(
                     snapshot.data.toString(),
                   );
-
-                  if (unitsMap.isEmpty) {
+                  if (unitsMap.isEmpty)
                     return const Center(child: Text("No units detected."));
-                  }
 
                   final sortedIds = unitsMap.keys.toList()
                     ..sort((a, b) => int.parse(a).compareTo(int.parse(b)));
@@ -156,16 +163,14 @@ class _TilesPageState extends State<TilesPage> {
                       final Map<String, dynamic> invData = unitsMap[idKey];
                       final List<dynamic> raw = invData['raw_data'] ?? [];
 
-                      String serialNumber = "Unknown SN";
-                      if (raw.isNotEmpty && raw.length > 1) {
-                        serialNumber = raw[1].toString().trim();
-                      }
-
+                      String serialNumber = raw.isNotEmpty
+                          ? raw[1].toString().trim()
+                          : "Unknown SN";
                       final String loadW = raw.length > 9
-                          ? "${raw[9]}W"
+                          ? _formatVal(raw[9], "W")
                           : "---";
                       final String battV = raw.length > 11
-                          ? "${raw[11]}V"
+                          ? _formatVal(raw[11], "V")
                           : "---";
 
                       return Card(
@@ -205,16 +210,19 @@ class _TilesPageState extends State<TilesPage> {
                             Icons.arrow_forward_ios,
                             size: 14,
                           ),
-                          onTap: () => Navigator.push(
-                            context,
-                            CustomPageRouter(
-                              page: InverterDetailPage(
-                                inverterId: int.parse(idKey),
-                                initialData: invData,
+                          onTap: () {
+                            if (!mounted) return;
+                            Navigator.push(
+                              context,
+                              CustomPageRouter(
+                                page: InverterDetailPage(
+                                  inverterId: int.parse(idKey),
+                                  initialData: invData,
+                                ),
+                                transitionType: TransitionType.slideFromRight,
                               ),
-                              transitionType: TransitionType.slideFromRight,
-                            ),
-                          ),
+                            );
+                          },
                         ),
                       );
                     },

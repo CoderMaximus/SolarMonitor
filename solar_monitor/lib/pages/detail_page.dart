@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:intl/intl.dart';
 import '../extras/theme_provider.dart';
 
 class InverterDetailPage extends StatefulWidget {
@@ -25,6 +26,8 @@ class _InverterDetailPageState extends State<InverterDetailPage>
   AnimationController? _bubbleController;
   WebSocketChannel? _channel;
 
+  final _f = NumberFormat("#,##0", "en_US");
+
   @override
   void initState() {
     super.initState();
@@ -36,7 +39,6 @@ class _InverterDetailPageState extends State<InverterDetailPage>
     final p = context.read<ThemeProvider>();
     _channel = WebSocketChannel.connect(Uri.parse(p.wsUrl));
 
-    // Map global stream to this specific unit ID
     _unitStream = _channel!.stream.map((event) {
       final Map<String, dynamic> allUnits = jsonDecode(event);
       return allUnits[widget.inverterId.toString()];
@@ -50,7 +52,6 @@ class _InverterDetailPageState extends State<InverterDetailPage>
     super.dispose();
   }
 
-  // Utility to clean strings with potential CRC/junk characters (like the r in your JSON)
   double _parse(dynamic val) {
     if (val == null) return 0.0;
     String s = val.toString().replaceAll(RegExp(r'[^0-9.]'), '');
@@ -75,37 +76,26 @@ class _InverterDetailPageState extends State<InverterDetailPage>
           final inv = snapshot.data;
           final List<dynamic> raw = inv['raw_data'];
 
-          // --- QPGS PROTOCOL MAPPINGS ---
           final String sn = raw[1].toString();
           final double loadW = _parse(raw[9]);
           final double loadPct = _parse(raw[10]);
           final double battV = _parse(raw[11]);
           final double battCap = _parse(raw[13]);
+          final double chgA = _parse(raw[12]);
+          final double dischgA = _parse(raw[26]);
 
-          // Battery currents
-          final double chgA = _parse(raw[12]); // Index 12: MMM
-          final double dischgA = _parse(raw[26]); // Index 26: b YYY
-
-          // Solar PV1
-          final double pv1V = _parse(raw[14]); // Index 14: PV1 V
-          final double pv1A = _parse(raw[25]); // Index 25: a XX
+          final double pv1V = _parse(raw[14]);
+          final double pv1A = _parse(raw[25]);
           final double pv1W = pv1V * pv1A;
 
-          // Solar PV2
-          final double pv2V = raw.length > 27
-              ? _parse(raw[27])
-              : 0.0; // Index 27: c OOO.O
-          final double pv2A = raw.length > 28
-              ? _parse(raw[28])
-              : 0.0; // Index 28: d XX
+          final double pv2V = raw.length > 27 ? _parse(raw[27]) : 0.0;
+          final double pv2A = raw.length > 28 ? _parse(raw[28]) : 0.0;
           final double pv2W = pv2V * pv2A;
 
-          // QED (Daily Energy) - Checking if your server appends it as a field
           final String qedValue = inv['qed']?.toString() ?? "0.00";
 
           return Column(
             children: [
-              // 1. Animated Flow Card
               Padding(
                 padding: const EdgeInsets.all(12.0),
                 child: Card(
@@ -130,13 +120,10 @@ class _InverterDetailPageState extends State<InverterDetailPage>
                   ),
                 ),
               ),
-
-              // 2. Statistics List
               Expanded(
                 child: ListView(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   children: [
-                    // Battery Card: Discharge under Charge
                     _infoCard(
                       "Battery Status",
                       Icons.battery_charging_full_rounded,
@@ -156,29 +143,30 @@ class _InverterDetailPageState extends State<InverterDetailPage>
                       ],
                     ),
                     const SizedBox(height: 10),
-
-                    // Solar Status: PV1/2 Power & QED
                     _infoCard("Solar Status", Icons.wb_sunny_rounded, [
-                      _row("PV1 Status", "${pv1V.toInt()}V / ${pv1W.toInt()}W"),
-                      _row("PV2 Status", "${pv2V.toInt()}V / ${pv2W.toInt()}W"),
+                      _row(
+                        "PV1 Status",
+                        "${pv1V.toInt()}V / ${_f.format(pv1W)}W",
+                      ),
+                      _row(
+                        "PV2 Status",
+                        "${pv2V.toInt()}V / ${_f.format(pv2W)}W",
+                      ),
                       _row(
                         "Total Solar Power",
-                        "${(pv1W + pv2W).toInt()} W",
+                        "${_f.format(pv1W + pv2W)} W",
                         color: Colors.orange,
                       ),
                       const Divider(),
-                      _row("Today Energy", "$qedValue Wh", color: p.seedColor),
+                      _row("Today Energy", "$qedValue kWh", color: p.seedColor),
                     ]),
                     const SizedBox(height: 10),
-
-                    // AC Status
                     _infoCard("AC Output", Icons.electrical_services_rounded, [
                       _row("Output Voltage", "${raw[6]} V"),
                       _row("Output Frequency", "${raw[7]} Hz"),
-                      _row("Load Power", "${loadW.toInt()} W"),
+                      _row("Load Power", "${_f.format(loadW)} W"),
                       _row("Load Percent", "${loadPct.toInt()}%"),
                     ]),
-
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 20),
                       child: Center(
@@ -223,7 +211,7 @@ class _InverterDetailPageState extends State<InverterDetailPage>
           hasLoad: loadW > 15,
           isCharging: chg > 0.1,
           isDischarging: dischg > 0.1,
-          lineColor: theme.dividerColor.withOpacity(0.1),
+          lineColor: theme.dividerColor.withValues(alpha: 0.1),
           bubbleColor: p.seedColor,
         ),
         child: Stack(
@@ -241,7 +229,7 @@ class _InverterDetailPageState extends State<InverterDetailPage>
               null,
               Icons.home_rounded,
               "Load",
-              "${loadW.toInt()}W",
+              "${_f.format(loadW)}W",
               active: loadW > 15,
               right: 10,
             ),
@@ -250,7 +238,7 @@ class _InverterDetailPageState extends State<InverterDetailPage>
               10,
               Icons.wb_sunny_rounded,
               "Solar",
-              "${pvW.toInt()}W",
+              "${_f.format(pvW)}W",
               active: pvW > 10,
               bottom: 10,
             ),
@@ -317,7 +305,7 @@ class _InverterDetailPageState extends State<InverterDetailPage>
     elevation: 0,
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.circular(12),
-      side: BorderSide(color: Colors.grey.withOpacity(0.1)),
+      side: BorderSide(color: Colors.grey.withValues(alpha: 0.1)),
     ),
     child: Padding(
       padding: const EdgeInsets.all(14),
@@ -386,7 +374,7 @@ class SolidFlowPainter extends CustomPainter {
       ..style = PaintingStyle.fill;
     final center = Offset(size.width / 2, size.height / 2);
     final nodes = {
-      'grid': Offset(40, 40),
+      'grid': const Offset(40, 40),
       'load': Offset(size.width - 40, 40),
       'solar': Offset(40, size.height - 40),
       'batt': Offset(size.width - 40, size.height - 40),
