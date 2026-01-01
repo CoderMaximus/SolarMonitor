@@ -1,3 +1,38 @@
-solar_monitor/build/
-inverter_api/target/
-solar_monitor/.dart_tool/
+# --- General ---
+.DS_Store
+.history
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+.env*
+
+# --- Flutter / Dart ---
+**/build/
+**/.dart_tool/
+**/.flutter-plugins
+**/.flutter-plugins-dependencies
+**/.packages
+**/pubspec.lock
+**/lib/generated_plugin_registrant.dart
+
+# Android/iOS specific
+**/android/.gradle/
+**/android/local.properties
+**/ios/.generated/
+**/ios/Flutter/Generated.xcconfig
+**/ios/Flutter/flutter_export_environment.sh
+**/ios/Pods/
+**/ios/.symlinks/
+
+# --- Rust ---
+**/target/
+**/*.rs.bk
+*.pdb
+
+# Keep Cargo.lock for applications! 
+# (Only ignore it if you are making a library)
+# !**/rust_folder/Cargo.lock 
+
+# --- Linux Trash ---
+.directory
+.Trash-*
