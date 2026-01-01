@@ -6,7 +6,7 @@ plugins {
 }
 
 android {
-    namespace = "com.example.solar_monitor_v2"
+    namespace = "com.example.solar_monitor"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = "29.0.14206865"
 
