@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../extras/theme_provider.dart';
@@ -20,6 +21,58 @@ class _SettingsPageState extends State<SettingsPage> {
     super.dispose();
   }
 
+  void _handleSoftRestart() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Restart App"),
+        content: const Text(
+          "This will close the app and disconnect all active data streams. Your settings will not be affected.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancel"),
+          ),
+          FilledButton(
+            onPressed: () async {
+              exit(0);
+            },
+            child: const Text("Exit App"),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _handleHardReset() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text("Hard Reset"),
+        content: const Text(
+          "This will clear all network settings and close the app. You will need to re-enter your server IP and Port on next launch.",
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Cancel"),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () async {
+              final p = context.read<ThemeProvider>();
+              p.updateNetwork("", "");
+              await Future.delayed(const Duration(milliseconds: 300));
+              exit(0);
+            },
+            child: const Text("Reset & Exit"),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = context.watch<ThemeProvider>();
@@ -39,7 +92,7 @@ class _SettingsPageState extends State<SettingsPage> {
           _buildSleekCard(
             child: Column(
               children: [
-                _buildTextField(_ipController, "Server IP", Icons.lan_outlined),
+                _buildTextField(_ipController, "Server IP", Icons.lan_rounded),
                 const Divider(height: 1, indent: 50),
                 _buildTextField(
                   _portController,
@@ -79,7 +132,7 @@ class _SettingsPageState extends State<SettingsPage> {
               children: [
                 _buildSleekDropdown<String>(
                   label: "Theme Mode",
-                  icon: Icons.palette_outlined,
+                  icon: Icons.palette_rounded,
                   value: p.currentTheme,
                   items: const [
                     DropdownMenuItem(value: 'dark', child: Text("Dark Mode")),
@@ -98,13 +151,59 @@ class _SettingsPageState extends State<SettingsPage> {
                   value: p.currentSeed,
                   items: [
                     _colorOption('Blue', Colors.blue, 'blue'),
-                    _colorOption('Green', Colors.green, 'green'),
                     _colorOption('Cyan', Colors.cyan, 'cyan'),
                     _colorOption('Purple', Colors.purple, 'purple'),
                     _colorOption('Teal', Colors.teal, 'teal'),
                     _colorOption('Indigo', Colors.indigo, 'indigo'),
                   ],
                   onChanged: (val) => p.changeSeed(val!),
+                ),
+                const Divider(height: 1, indent: 50),
+                _buildSleekDropdown<String>(
+                  label: "UI Mode",
+                  icon: Icons.dashboard_customize_rounded,
+                  value: p.uiMode,
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'standard',
+                      child: Text("Standard"),
+                    ),
+                    DropdownMenuItem(
+                      value: 'alternate',
+                      child: Text("Alternate"),
+                    ),
+                  ],
+                  onChanged: (val) => p.changeUiMode(val!),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 24),
+          _sectionHeader("Reset Options"),
+          const SizedBox(height: 12),
+          _buildSleekCard(
+            child: Column(
+              children: [
+                ListTile(
+                  leading: const Icon(
+                    Icons.power_settings_new_rounded,
+                    color: Colors.orange,
+                  ),
+                  title: const Text("Soft Restart"),
+                  subtitle: const Text(
+                    "Closes connections & exits (keeps settings)",
+                  ),
+                  onTap: _handleSoftRestart,
+                ),
+                const Divider(height: 1, indent: 55),
+                ListTile(
+                  leading: const Icon(
+                    Icons.delete_forever_rounded,
+                    color: Colors.red,
+                  ),
+                  title: const Text("Hard Reset"),
+                  subtitle: const Text("Clears everything and exits app"),
+                  onTap: _handleHardReset,
                 ),
               ],
             ),
