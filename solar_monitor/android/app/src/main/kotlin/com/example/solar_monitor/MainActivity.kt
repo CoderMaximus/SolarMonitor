@@ -1,4 +1,4 @@
-package com.example.solar_monitor_v2
+package com.example.solar_monitor
 
 import io.flutter.embedding.android.FlutterActivity
 

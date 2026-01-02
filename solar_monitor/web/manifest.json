@@ -1,6 +1,6 @@
 {
-    "name": "solar_monitor_v2",
-    "short_name": "solar_monitor_v2",
+    "name": "solar_monitor",
+    "short_name": "solar_monitor",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",
