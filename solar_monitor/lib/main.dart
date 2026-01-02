@@ -67,14 +67,14 @@ class _MainEntryPageState extends State<MainEntryPage> {
 
   @override
   Widget build(BuildContext context) {
-    final p = context.watch<ThemeProvider>();
-    final color = p.seedColor;
+    final provider = context.watch<ThemeProvider>();
+    final color = provider.seedColor;
 
-    final List<Widget> pages = p.uiMode == 'standard'
+    final List<Widget> pages = provider.uiMode == 'standard'
         ? [const GraphPage(), const TilesPage(), const SettingsPage()]
         : [const AltDashboard(), const GraphPage(), const SettingsPage()];
 
-    final List<GButton> tabs = p.uiMode == 'standard'
+    final List<GButton> tabs = provider.uiMode == 'standard'
         ? const [
             GButton(icon: Icons.dashboard_rounded, text: 'Dashboard'),
             GButton(icon: Icons.power_rounded, text: 'Units'),

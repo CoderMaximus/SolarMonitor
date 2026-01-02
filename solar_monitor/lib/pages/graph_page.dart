@@ -157,8 +157,8 @@ class _GraphPageState extends State<GraphPage> {
 
   double _parse(dynamic val) {
     if (val == null) return 0.0;
-    String s = val.toString().replaceAll(RegExp(r'[^0-9.]'), '');
-    return double.tryParse(s) ?? 0.0;
+    String string = val.toString().replaceAll(RegExp(r'[^0-9.]'), '');
+    return double.tryParse(string) ?? 0.0;
   }
 
   Future<void> _fetchHistory({bool shouldJump = true}) async {

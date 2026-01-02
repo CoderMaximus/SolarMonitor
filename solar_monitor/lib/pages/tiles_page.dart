@@ -42,10 +42,10 @@ class _TilesPageState extends State<TilesPage> {
   void _connect() {
     if (!mounted || _isDisposed) return;
     try {
-      final p = Provider.of<ThemeProvider>(context, listen: false);
-      if (p.rustIp.isEmpty) return;
+      final provider = Provider.of<ThemeProvider>(context, listen: false);
+      if (provider.rustIp.isEmpty) return;
       _cleanup();
-      final ws = WebSocketChannel.connect(Uri.parse(p.wsUrl));
+      final ws = WebSocketChannel.connect(Uri.parse(provider.wsUrl));
       if (mounted && !_isDisposed) {
         setState(() {
           _channel = ws;
