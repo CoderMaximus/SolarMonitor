@@ -88,6 +88,7 @@ class _MainEntryPageState extends State<MainEntryPage> {
 
     return Scaffold(
       body: PageView(
+        physics: const NeverScrollableScrollPhysics(),
         controller: _pageController,
         onPageChanged: (index) {
           setState(() {

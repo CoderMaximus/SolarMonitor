@@ -97,6 +97,10 @@ class _AltDashboardState extends State<AltDashboard> {
               snapshot.data.toString(),
             );
 
+            // Sort IDs numerically so Unit 1 is always first
+            final sortedKeys = unitsMap.keys.toList()
+              ..sort((a, b) => int.parse(a).compareTo(int.parse(b)));
+
             double totalPV = 0;
             double totalLoad = 0;
             double totalQedRaw = 0;
@@ -105,7 +109,8 @@ class _AltDashboardState extends State<AltDashboard> {
             double sumBattV = 0;
             int unitCount = 0;
 
-            unitsMap.forEach((k, v) {
+            for (var key in sortedKeys) {
+              final v = unitsMap[key];
               final raw = v['raw_data'] ?? [];
               if (raw.length >= 29) {
                 unitCount++;
@@ -118,7 +123,7 @@ class _AltDashboardState extends State<AltDashboard> {
                 sumBattV += _parse(raw[11]);
               }
               totalQedRaw += _parse(v['qed']);
-            });
+            }
 
             double netPowerW = totalPV - totalLoad;
             double avgBattV = unitCount > 0 ? sumBattV / unitCount : 0.0;
@@ -185,12 +190,12 @@ class _AltDashboardState extends State<AltDashboard> {
                 Wrap(
                   spacing: 12,
                   runSpacing: 12,
-                  children: unitsMap.entries.map((entry) {
+                  children: sortedKeys.map((key) {
                     return SizedBox(
                       width: MediaQuery.of(context).size.width > 600
                           ? (MediaQuery.of(context).size.width / 2) - 18
                           : double.infinity,
-                      child: _buildDetailedUnitCard(entry.key, entry.value, p),
+                      child: _buildDetailedUnitCard(key, unitsMap[key], p),
                     );
                   }).toList(),
                 ),

@@ -25,9 +25,7 @@ class _TilesPageState extends State<TilesPage> {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && !_isDisposed) {
-        _connect();
-      }
+      if (mounted && !_isDisposed) _connect();
     });
   }
 
@@ -103,56 +101,17 @@ class _TilesPageState extends State<TilesPage> {
           : StreamBuilder(
               stream: _broadcastStream,
               builder: (context, snapshot) {
-                if (snapshot.hasError) {
-                  return Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const Icon(
-                          Icons.cloud_off_rounded,
-                          size: 64,
-                          color: Colors.grey,
-                        ),
-                        const SizedBox(height: 16),
-                        const Text(
-                          "Connection Lost",
-                          style: TextStyle(fontWeight: FontWeight.bold),
-                        ),
-                        const SizedBox(height: 24),
-                        ElevatedButton(
-                          onPressed: _refresh,
-                          child: const Text("Retry"),
-                        ),
-                      ],
-                    ),
-                  );
-                }
-
-                if (snapshot.connectionState == ConnectionState.waiting ||
-                    !snapshot.hasData) {
-                  return const Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        CircularProgressIndicator(),
-                        SizedBox(height: 16),
-                        Text(
-                          "Awaiting data pulse...",
-                          style: TextStyle(color: Colors.grey),
-                        ),
-                      ],
-                    ),
-                  );
-                }
+                if (snapshot.hasError) return _buildErrorUI();
+                if (!snapshot.hasData) return _buildWaitingUI();
 
                 try {
                   final Map<String, dynamic> unitsMap = jsonDecode(
                     snapshot.data.toString(),
                   );
-                  if (unitsMap.isEmpty) {
+                  if (unitsMap.isEmpty)
                     return const Center(child: Text("No units detected."));
-                  }
 
+                  // Numeric sort: 1, 2, 3...
                   final sortedIds = unitsMap.keys.toList()
                     ..sort((a, b) => int.parse(a).compareTo(int.parse(b)));
 
@@ -212,7 +171,6 @@ class _TilesPageState extends State<TilesPage> {
                             size: 14,
                           ),
                           onTap: () {
-                            if (!mounted) return;
                             Navigator.push(
                               context,
                               CustomPageRouter(
@@ -235,4 +193,31 @@ class _TilesPageState extends State<TilesPage> {
             ),
     );
   }
+
+  Widget _buildErrorUI() => Center(
+    child: Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        const Icon(Icons.cloud_off_rounded, size: 64, color: Colors.grey),
+        const SizedBox(height: 16),
+        const Text(
+          "Connection Lost",
+          style: TextStyle(fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 24),
+        ElevatedButton(onPressed: _refresh, child: const Text("Retry")),
+      ],
+    ),
+  );
+
+  Widget _buildWaitingUI() => const Center(
+    child: Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        CircularProgressIndicator(),
+        SizedBox(height: 16),
+        Text("Awaiting data pulse...", style: TextStyle(color: Colors.grey)),
+      ],
+    ),
+  );
 }
