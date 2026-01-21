@@ -32,6 +32,7 @@ class _GraphPageState extends State<GraphPage> {
   WebSocketChannel? _channel;
   StreamSubscription? _wsSubscription;
   Timer? _refreshTimer;
+  Timer? _httpPollTimer;
   late TransformationController _transformationController;
   final GlobalKey _chartKey = GlobalKey();
 
@@ -46,7 +47,7 @@ class _GraphPageState extends State<GraphPage> {
     super.initState();
     _transformationController = TransformationController();
     _fetchHistory();
-    _connectWebSocket();
+    _connectDataStream();
     _startAutoRefresh();
   }
 
@@ -86,23 +87,63 @@ class _GraphPageState extends State<GraphPage> {
     });
   }
 
-  void _connectWebSocket() {
+  void _connectDataStream() {
+    if (!mounted) return;
     final p = context.read<ThemeProvider>();
-    if (p.rustIp.isEmpty) return;
+    // Check if we have valid connection settings
+    if (!p.useDirectUrl && p.rustIp.isEmpty) return;
+    if (p.useDirectUrl && p.directWsUrl.isEmpty) return;
 
+    // Cleanup existing connections
+    _wsSubscription?.cancel();
+    _channel?.sink.close();
+    _httpPollTimer?.cancel();
+
+    if (p.isDataWebSocket) {
+      // Use WebSocket for ws:// or wss://
+      try {
+        _channel = WebSocketChannel.connect(Uri.parse(p.dataUrl));
+        _wsSubscription = _channel?.stream.listen(
+          (message) => _handleIncomingData(message),
+          onError: (err) {
+            debugPrint("WS Error: $err");
+            if (mounted) {
+              Future.delayed(const Duration(seconds: 5), _connectDataStream);
+            }
+          },
+          onDone: () {
+            if (mounted) {
+              Future.delayed(const Duration(seconds: 5), _connectDataStream);
+            }
+          },
+        );
+      } catch (e) {
+        debugPrint("WS Connection Error: $e");
+      }
+    } else {
+      // Use HTTP polling for http:// or https://
+      _startHttpDataPolling(p);
+    }
+  }
+
+  void _startHttpDataPolling(ThemeProvider provider) {
+    _fetchHttpData(provider);
+    _httpPollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (mounted) {
+        _fetchHttpData(provider);
+      }
+    });
+  }
+
+  Future<void> _fetchHttpData(ThemeProvider provider) async {
+    if (!mounted) return;
     try {
-      _channel = WebSocketChannel.connect(Uri.parse("ws://${p.rustIp}:3001"));
-      _wsSubscription = _channel?.stream.listen(
-        (message) => _handleIncomingData(message),
-        onError: (err) {
-          debugPrint("WS Error: $err");
-          Future.delayed(const Duration(seconds: 5), _connectWebSocket);
-        },
-        onDone: () =>
-            Future.delayed(const Duration(seconds: 5), _connectWebSocket),
-      );
+      final response = await http.get(Uri.parse(provider.dataUrl));
+      if (response.statusCode == 200 && mounted) {
+        _handleIncomingData(response.body);
+      }
     } catch (e) {
-      debugPrint("WS Connection Error: $e");
+      debugPrint("HTTP Data Fetch Error: $e");
     }
   }
 
@@ -151,6 +192,7 @@ class _GraphPageState extends State<GraphPage> {
     _wsSubscription?.cancel();
     _channel?.sink.close();
     _refreshTimer?.cancel();
+    _httpPollTimer?.cancel();
     _transformationController.dispose();
     super.dispose();
   }
@@ -162,12 +204,16 @@ class _GraphPageState extends State<GraphPage> {
   }
 
   Future<void> _fetchHistory({bool shouldJump = true}) async {
+    if (!mounted) return;
     final p = context.read<ThemeProvider>();
-    if (_isFetchingHistory || p.rustIp.isEmpty) return;
+    // Check if we have valid connection settings
+    if (_isFetchingHistory) return;
+    if (!p.useDirectUrl && p.rustIp.isEmpty) return;
+    if (p.useDirectUrl && p.directHttpUrl.isEmpty) return;
     setState(() => _isFetchingHistory = true);
 
     try {
-      final res = await http.get(Uri.parse("http://${p.rustIp}:3000/history"));
+      final res = await http.get(Uri.parse("${p.httpUrl}/history"));
       if (res.statusCode == 200) {
         final List<dynamic> data = jsonDecode(res.body);
         final List<FlSpot> tLoad = [];

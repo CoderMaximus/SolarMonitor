@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:intl/intl.dart';
@@ -17,6 +19,8 @@ class TilesPage extends StatefulWidget {
 class _TilesPageState extends State<TilesPage> {
   WebSocketChannel? _channel;
   Stream? _broadcastStream;
+  Timer? _httpPollTimer;
+  Map<String, dynamic>? _httpData;
   bool _isDisposed = false;
 
   final _f = NumberFormat("#,##0", "en_US");
@@ -41,17 +45,49 @@ class _TilesPageState extends State<TilesPage> {
     if (!mounted || _isDisposed) return;
     try {
       final provider = Provider.of<ThemeProvider>(context, listen: false);
-      if (provider.rustIp.isEmpty) return;
+      // Check if we have valid connection settings
+      if (!provider.useDirectUrl && provider.rustIp.isEmpty) return;
+      if (provider.useDirectUrl && provider.directWsUrl.isEmpty) return;
       _cleanup();
-      final ws = WebSocketChannel.connect(Uri.parse(provider.wsUrl));
+
+      if (provider.isDataWebSocket) {
+        // Use WebSocket for ws:// or wss://
+        final ws = WebSocketChannel.connect(Uri.parse(provider.dataUrl));
+        if (mounted && !_isDisposed) {
+          setState(() {
+            _channel = ws;
+            _broadcastStream = _channel!.stream.asBroadcastStream();
+          });
+        }
+      } else {
+        // Use HTTP polling for http:// or https://
+        _startHttpPolling(provider);
+      }
+    } catch (e) {
+      debugPrint("Connection Error: $e");
+    }
+  }
+
+  void _startHttpPolling(ThemeProvider provider) {
+    _fetchHttpData(provider);
+    _httpPollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
       if (mounted && !_isDisposed) {
+        _fetchHttpData(provider);
+      }
+    });
+  }
+
+  Future<void> _fetchHttpData(ThemeProvider provider) async {
+    if (!mounted || _isDisposed) return;
+    try {
+      final response = await http.get(Uri.parse(provider.dataUrl));
+      if (response.statusCode == 200 && mounted && !_isDisposed) {
         setState(() {
-          _channel = ws;
-          _broadcastStream = _channel!.stream.asBroadcastStream();
+          _httpData = jsonDecode(response.body);
         });
       }
     } catch (e) {
-      debugPrint("WS Connection Error: $e");
+      debugPrint("HTTP Fetch Error: $e");
     }
   }
 
@@ -59,6 +95,8 @@ class _TilesPageState extends State<TilesPage> {
     _channel?.sink.close();
     _channel = null;
     _broadcastStream = null;
+    _httpPollTimer?.cancel();
+    _httpPollTimer = null;
   }
 
   void _refresh() {
@@ -96,101 +134,117 @@ class _TilesPageState extends State<TilesPage> {
           ),
         ],
       ),
-      body: _broadcastStream == null
-          ? const Center(child: CircularProgressIndicator())
-          : StreamBuilder(
-              stream: _broadcastStream,
-              builder: (context, snapshot) {
-                if (snapshot.hasError) return _buildErrorUI();
-                if (!snapshot.hasData) return _buildWaitingUI();
+      body: _buildBody(p),
+    );
+  }
 
-                try {
-                  final Map<String, dynamic> unitsMap = jsonDecode(
-                    snapshot.data.toString(),
-                  );
-                  if (unitsMap.isEmpty)
-                    return const Center(child: Text("No units detected."));
+  Widget _buildBody(ThemeProvider p) {
+    // HTTP polling mode
+    if (p.isDataHttp) {
+      if (_httpData == null) {
+        return _buildWaitingUI();
+      }
+      return _buildUnitsList(_httpData!, p);
+    }
 
-                  // Numeric sort: 1, 2, 3...
-                  final sortedIds = unitsMap.keys.toList()
-                    ..sort((a, b) => int.parse(a).compareTo(int.parse(b)));
+    // WebSocket mode
+    if (_broadcastStream == null) {
+      return const Center(child: CircularProgressIndicator());
+    }
 
-                  return ListView.builder(
-                    padding: const EdgeInsets.all(16),
-                    itemCount: sortedIds.length,
-                    itemBuilder: (context, index) {
-                      final String idKey = sortedIds[index];
-                      final Map<String, dynamic> invData = unitsMap[idKey];
-                      final List<dynamic> raw = invData['raw_data'] ?? [];
+    return StreamBuilder(
+      stream: _broadcastStream,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) return _buildErrorUI();
+        if (!snapshot.hasData) return _buildWaitingUI();
 
-                      String serialNumber = raw.isNotEmpty
-                          ? raw[1].toString().trim()
-                          : "Unknown SN";
-                      final String loadW = raw.length > 9
-                          ? _formatVal(raw[9], "W")
-                          : "---";
-                      final String battV = raw.length > 11
-                          ? _formatVal(raw[11], "V")
-                          : "---";
+        try {
+          final Map<String, dynamic> unitsMap = jsonDecode(
+            snapshot.data.toString(),
+          );
+          return _buildUnitsList(unitsMap, p);
+        } catch (e) {
+          return const Center(child: Text("Data Sync Error"));
+        }
+      },
+    );
+  }
 
-                      return Card(
-                        elevation: 0,
-                        margin: const EdgeInsets.only(bottom: 12),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                          side: BorderSide(
-                            color: Theme.of(
-                              context,
-                            ).dividerColor.withValues(alpha: 0.1),
-                          ),
-                        ),
-                        child: ListTile(
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 20,
-                            vertical: 8,
-                          ),
-                          leading: CircleAvatar(
-                            backgroundColor: p.seedColor.withValues(
-                              alpha: 0.08,
-                            ),
-                            child: Icon(
-                              Icons.developer_board_rounded,
-                              color: p.seedColor,
-                            ),
-                          ),
-                          title: Text(
-                            serialNumber,
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
-                            ),
-                          ),
-                          subtitle: Text("Unit #$idKey  •  $loadW  •  $battV"),
-                          trailing: const Icon(
-                            Icons.arrow_forward_ios,
-                            size: 14,
-                          ),
-                          onTap: () {
-                            Navigator.push(
-                              context,
-                              CustomPageRouter(
-                                page: InverterDetailPage(
-                                  inverterId: int.parse(idKey),
-                                  initialData: invData,
-                                ),
-                                transitionType: TransitionType.slideFromRight,
-                              ),
-                            );
-                          },
-                        ),
-                      );
-                    },
-                  );
-                } catch (e) {
-                  return const Center(child: Text("Data Sync Error"));
-                }
-              },
+  Widget _buildUnitsList(Map<String, dynamic> unitsMap, ThemeProvider p) {
+    if (unitsMap.isEmpty) {
+      return const Center(child: Text("No units detected."));
+    }
+
+    // Numeric sort: 1, 2, 3...
+    final sortedIds = unitsMap.keys.toList()
+      ..sort((a, b) => int.parse(a).compareTo(int.parse(b)));
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: sortedIds.length,
+      itemBuilder: (context, index) {
+        final String idKey = sortedIds[index];
+        final Map<String, dynamic> invData = unitsMap[idKey];
+        final List<dynamic> raw = invData['raw_data'] ?? [];
+
+        String serialNumber = raw.isNotEmpty
+            ? raw[1].toString().trim()
+            : "Unknown SN";
+        final String loadW = raw.length > 9
+            ? _formatVal(raw[9], "W")
+            : "---";
+        final String battV = raw.length > 11
+            ? _formatVal(raw[11], "V")
+            : "---";
+
+        return Card(
+          elevation: 0,
+          margin: const EdgeInsets.only(bottom: 12),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: BorderSide(
+              color: Theme.of(context).dividerColor.withValues(alpha: 0.1),
             ),
+          ),
+          child: ListTile(
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 20,
+              vertical: 8,
+            ),
+            leading: CircleAvatar(
+              backgroundColor: p.seedColor.withValues(alpha: 0.08),
+              child: Icon(
+                Icons.developer_board_rounded,
+                color: p.seedColor,
+              ),
+            ),
+            title: Text(
+              serialNumber,
+              style: const TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: 15,
+              ),
+            ),
+            subtitle: Text("Unit #$idKey  •  $loadW  •  $battV"),
+            trailing: const Icon(
+              Icons.arrow_forward_ios,
+              size: 14,
+            ),
+            onTap: () {
+              Navigator.push(
+                context,
+                CustomPageRouter(
+                  page: InverterDetailPage(
+                    inverterId: int.parse(idKey),
+                    initialData: invData,
+                  ),
+                  transitionType: TransitionType.slideFromRight,
+                ),
+              );
+            },
+          ),
+        );
+      },
     );
   }
 

@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:intl/intl.dart';
@@ -15,6 +17,8 @@ class AltDashboard extends StatefulWidget {
 class _AltDashboardState extends State<AltDashboard> {
   WebSocketChannel? _channel;
   Stream? _broadcastStream;
+  Timer? _httpPollTimer;
+  Map<String, dynamic>? _httpData;
   bool _isDisposed = false;
 
   final _f = NumberFormat("#,##0", "en_US");
@@ -32,22 +36,65 @@ class _AltDashboardState extends State<AltDashboard> {
     _channel?.sink.close();
     _channel = null;
     _broadcastStream = null;
+    _httpPollTimer?.cancel();
+    _httpPollTimer = null;
   }
 
   void _connect() {
     if (!mounted || _isDisposed) return;
     try {
       final p = Provider.of<ThemeProvider>(context, listen: false);
-      if (p.rustIp.isEmpty) return;
+      // Check if we have valid connection settings
+      if (!p.useDirectUrl && p.rustIp.isEmpty) return;
+      if (p.useDirectUrl && p.directWsUrl.isEmpty) return;
       _cleanup();
-      _channel = WebSocketChannel.connect(Uri.parse(p.wsUrl));
-      if (mounted && !_isDisposed) {
-        setState(() {
-          _broadcastStream = _channel!.stream.asBroadcastStream();
-        });
+
+      if (p.isDataWebSocket) {
+        // Use WebSocket for ws:// or wss://
+        _channel = WebSocketChannel.connect(Uri.parse(p.dataUrl));
+        if (mounted && !_isDisposed) {
+          setState(() {
+            _broadcastStream = _channel!.stream.asBroadcastStream();
+          });
+        }
+      } else {
+        // Use HTTP polling for http:// or https://
+        _startHttpPolling(p);
       }
     } catch (e) {
       debugPrint("Connection error: $e");
+    }
+  }
+
+  void _startHttpPolling(ThemeProvider provider) {
+    _fetchHttpData(provider);
+    _httpPollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (mounted && !_isDisposed) {
+        _fetchHttpData(provider);
+      }
+    });
+  }
+
+  Future<void> _fetchHttpData(ThemeProvider provider) async {
+    if (!mounted || _isDisposed) return;
+    try {
+      debugPrint("HTTP Fetching from: ${provider.dataUrl}");
+      final response = await http.get(Uri.parse(provider.dataUrl));
+      debugPrint("HTTP Status: ${response.statusCode}");
+      debugPrint("HTTP Body (first 500 chars): ${response.body.substring(0, response.body.length > 500 ? 500 : response.body.length)}");
+      if (response.statusCode == 200 && mounted && !_isDisposed) {
+        final decoded = jsonDecode(response.body);
+        debugPrint("Decoded type: ${decoded.runtimeType}");
+        debugPrint("Decoded keys: ${decoded is Map ? decoded.keys.toList() : 'not a map'}");
+        setState(() {
+          _httpData = decoded;
+        });
+      } else {
+        debugPrint("HTTP Bad status or unmounted: ${response.statusCode}");
+      }
+    } catch (e, stack) {
+      debugPrint("HTTP Fetch Error: $e");
+      debugPrint("Stack: $stack");
     }
   }
 
@@ -84,128 +131,144 @@ class _AltDashboardState extends State<AltDashboard> {
           ),
         ],
       ),
-      body: StreamBuilder(
-        stream: _broadcastStream,
-        builder: (context, snapshot) {
-          if (snapshot.hasError) return _buildErrorState();
-          if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
+      body: _buildBody(p, color),
+    );
+  }
 
-          try {
-            final Map<String, dynamic> unitsMap = jsonDecode(
-              snapshot.data.toString(),
+  Widget _buildBody(ThemeProvider p, Color color) {
+    // HTTP polling mode
+    if (p.isDataHttp) {
+      if (_httpData == null) {
+        return const Center(child: CircularProgressIndicator());
+      }
+      return _buildDashboardContent(_httpData!, p, color);
+    }
+
+    // WebSocket mode
+    return StreamBuilder(
+      stream: _broadcastStream,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) return _buildErrorState();
+        if (!snapshot.hasData) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        try {
+          final Map<String, dynamic> unitsMap = jsonDecode(
+            snapshot.data.toString(),
+          );
+          return _buildDashboardContent(unitsMap, p, color);
+        } catch (e) {
+          return Center(child: Text("Parse Error: $e"));
+        }
+      },
+    );
+  }
+
+  Widget _buildDashboardContent(Map<String, dynamic> unitsMap, ThemeProvider p, Color color) {
+    // Sort IDs numerically so Unit 1 is always first
+    final sortedKeys = unitsMap.keys.toList()
+      ..sort((a, b) => int.parse(a).compareTo(int.parse(b)));
+
+    double totalPV = 0;
+    double totalLoad = 0;
+    double totalQedRaw = 0;
+    double totalChg = 0;
+    double totalDischg = 0;
+    double sumBattV = 0;
+    int unitCount = 0;
+
+    for (var key in sortedKeys) {
+      final v = unitsMap[key];
+      final raw = v['raw_data'] ?? [];
+      if (raw.length >= 29) {
+        unitCount++;
+        totalPV +=
+            (_parse(raw[14]) * _parse(raw[25])) +
+            (_parse(raw[27]) * _parse(raw[28]));
+        totalLoad += _parse(raw[9]);
+        totalChg += _parse(raw[12]);
+        totalDischg += _parse(raw.length > 31 ? raw[31] : raw[26]);
+        sumBattV += _parse(raw[11]);
+      }
+      totalQedRaw += _parse(v['qed']);
+    }
+
+    double netPowerW = totalPV - totalLoad;
+    double avgBattV = unitCount > 0 ? sumBattV / unitCount : 0.0;
+    double netBattA = totalChg - totalDischg;
+    double totalTodayKwh = totalQedRaw > 100
+        ? totalQedRaw / 1000.0
+        : totalQedRaw;
+
+    String powerLabel =
+        "${netPowerW >= 0 ? '+' : '-'}${_f.format(netPowerW.abs())}W";
+    String battLabel =
+        "${_d.format(avgBattV)}V, ${netBattA >= 0 ? '+' : '-'}${_d.format(netBattA.abs())}A";
+
+    return ListView(
+      padding: const EdgeInsets.all(12),
+      children: [
+        Row(
+          children: [
+            _miniStat(
+              "Solar",
+              "${_f.format(totalPV)}W",
+              Icons.wb_sunny_rounded,
+              Colors.green,
+            ),
+            const SizedBox(width: 8),
+            _miniStat(
+              "Load",
+              "${_f.format(totalLoad)}W",
+              Icons.bolt_rounded,
+              color,
+            ),
+            const SizedBox(width: 8),
+            _miniStat(
+              "Today",
+              "${totalTodayKwh.toStringAsFixed(2)}kWh",
+              Icons.calendar_today_rounded,
+              Colors.yellow[700]!,
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            _miniStat(
+              netPowerW >= 0 ? "Feeding" : "Drawing",
+              powerLabel,
+              netPowerW >= 0
+                  ? Icons.trending_up_rounded
+                  : Icons.trending_down_rounded,
+              netPowerW >= 0 ? Colors.cyan : Colors.orange,
+            ),
+            const SizedBox(width: 8),
+            _miniStat(
+              netBattA >= 0 ? "Charging" : "Discharging",
+              battLabel,
+              netBattA >= 0
+                  ? Icons.battery_charging_full_rounded
+                  : Icons.battery_alert_rounded,
+              netBattA >= 0 ? Colors.teal : Colors.deepOrange,
+            ),
+          ],
+        ),
+        const SizedBox(height: 18),
+        Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: sortedKeys.map((key) {
+            return SizedBox(
+              width: MediaQuery.of(context).size.width > 600
+                  ? (MediaQuery.of(context).size.width / 2) - 18
+                  : double.infinity,
+              child: _buildDetailedUnitCard(key, unitsMap[key], p),
             );
-
-            // Sort IDs numerically so Unit 1 is always first
-            final sortedKeys = unitsMap.keys.toList()
-              ..sort((a, b) => int.parse(a).compareTo(int.parse(b)));
-
-            double totalPV = 0;
-            double totalLoad = 0;
-            double totalQedRaw = 0;
-            double totalChg = 0;
-            double totalDischg = 0;
-            double sumBattV = 0;
-            int unitCount = 0;
-
-            for (var key in sortedKeys) {
-              final v = unitsMap[key];
-              final raw = v['raw_data'] ?? [];
-              if (raw.length >= 29) {
-                unitCount++;
-                totalPV +=
-                    (_parse(raw[14]) * _parse(raw[25])) +
-                    (_parse(raw[27]) * _parse(raw[28]));
-                totalLoad += _parse(raw[9]);
-                totalChg += _parse(raw[12]);
-                totalDischg += _parse(raw.length > 31 ? raw[31] : raw[26]);
-                sumBattV += _parse(raw[11]);
-              }
-              totalQedRaw += _parse(v['qed']);
-            }
-
-            double netPowerW = totalPV - totalLoad;
-            double avgBattV = unitCount > 0 ? sumBattV / unitCount : 0.0;
-            double netBattA = totalChg - totalDischg;
-            double totalTodayKwh = totalQedRaw > 100
-                ? totalQedRaw / 1000.0
-                : totalQedRaw;
-
-            String powerLabel =
-                "${netPowerW >= 0 ? '+' : '-'}${_f.format(netPowerW.abs())}W";
-            String battLabel =
-                "${_d.format(avgBattV)}V, ${netBattA >= 0 ? '+' : '-'}${_d.format(netBattA.abs())}A";
-
-            return ListView(
-              padding: const EdgeInsets.all(12),
-              children: [
-                Row(
-                  children: [
-                    _miniStat(
-                      "Solar",
-                      "${_f.format(totalPV)}W",
-                      Icons.wb_sunny_rounded,
-                      Colors.green,
-                    ),
-                    const SizedBox(width: 8),
-                    _miniStat(
-                      "Load",
-                      "${_f.format(totalLoad)}W",
-                      Icons.bolt_rounded,
-                      color,
-                    ),
-                    const SizedBox(width: 8),
-                    _miniStat(
-                      "Today",
-                      "${totalTodayKwh.toStringAsFixed(2)}kWh",
-                      Icons.calendar_today_rounded,
-                      Colors.yellow[700]!,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    _miniStat(
-                      netPowerW >= 0 ? "Feeding" : "Drawing",
-                      powerLabel,
-                      netPowerW >= 0
-                          ? Icons.trending_up_rounded
-                          : Icons.trending_down_rounded,
-                      netPowerW >= 0 ? Colors.cyan : Colors.orange,
-                    ),
-                    const SizedBox(width: 8),
-                    _miniStat(
-                      netBattA >= 0 ? "Charging" : "Discharging",
-                      battLabel,
-                      netBattA >= 0
-                          ? Icons.battery_charging_full_rounded
-                          : Icons.battery_alert_rounded,
-                      netBattA >= 0 ? Colors.teal : Colors.deepOrange,
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 18),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
-                  children: sortedKeys.map((key) {
-                    return SizedBox(
-                      width: MediaQuery.of(context).size.width > 600
-                          ? (MediaQuery.of(context).size.width / 2) - 18
-                          : double.infinity,
-                      child: _buildDetailedUnitCard(key, unitsMap[key], p),
-                    );
-                  }).toList(),
-                ),
-              ],
-            );
-          } catch (e) {
-            return Center(child: Text("Parse Error: $e"));
-          }
-        },
-      ),
+          }).toList(),
+        ),
+      ],
     );
   }
 

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:intl/intl.dart';
@@ -22,9 +23,11 @@ class InverterDetailPage extends StatefulWidget {
 
 class _InverterDetailPageState extends State<InverterDetailPage>
     with SingleTickerProviderStateMixin {
-  late Stream<dynamic> _unitStream;
+  Stream<dynamic>? _unitStream;
+  StreamController<dynamic>? _httpStreamController;
   AnimationController? _bubbleController;
   WebSocketChannel? _channel;
+  Timer? _httpPollTimer;
 
   final _f = NumberFormat("#,##0", "en_US");
 
@@ -36,18 +39,61 @@ class _InverterDetailPageState extends State<InverterDetailPage>
       duration: const Duration(seconds: 2),
     )..repeat();
 
-    final p = context.read<ThemeProvider>();
-    _channel = WebSocketChannel.connect(Uri.parse(p.wsUrl));
+    _connectDataStream();
+  }
 
-    _unitStream = _channel!.stream.map((event) {
-      final Map<String, dynamic> allUnits = jsonDecode(event);
-      return allUnits[widget.inverterId.toString()];
-    }).asBroadcastStream();
+  void _connectDataStream() {
+    final p = context.read<ThemeProvider>();
+    // Only connect if we have valid connection settings
+    if ((!p.useDirectUrl && p.rustIp.isNotEmpty) ||
+        (p.useDirectUrl && p.directWsUrl.isNotEmpty)) {
+      
+      if (p.isDataWebSocket) {
+        // Use WebSocket for ws:// or wss://
+        _channel = WebSocketChannel.connect(Uri.parse(p.dataUrl));
+        _unitStream = _channel!.stream.map((event) {
+          final Map<String, dynamic> allUnits = jsonDecode(event);
+          return allUnits[widget.inverterId.toString()];
+        }).asBroadcastStream();
+      } else {
+        // Use HTTP polling for http:// or https://
+        _httpStreamController = StreamController<dynamic>.broadcast();
+        _unitStream = _httpStreamController!.stream;
+        _startHttpPolling(p);
+      }
+    } else {
+      _unitStream = const Stream.empty();
+    }
+  }
+
+  void _startHttpPolling(ThemeProvider provider) {
+    _fetchHttpData(provider);
+    _httpPollTimer = Timer.periodic(const Duration(seconds: 2), (_) {
+      if (mounted) {
+        _fetchHttpData(provider);
+      }
+    });
+  }
+
+  Future<void> _fetchHttpData(ThemeProvider provider) async {
+    if (!mounted) return;
+    try {
+      final response = await http.get(Uri.parse(provider.dataUrl));
+      if (response.statusCode == 200 && mounted) {
+        final Map<String, dynamic> allUnits = jsonDecode(response.body);
+        final unitData = allUnits[widget.inverterId.toString()];
+        _httpStreamController?.add(unitData);
+      }
+    } catch (e) {
+      debugPrint("HTTP Fetch Error: $e");
+    }
   }
 
   @override
   void dispose() {
     _channel?.sink.close();
+    _httpPollTimer?.cancel();
+    _httpStreamController?.close();
     _bubbleController?.dispose();
     super.dispose();
   }

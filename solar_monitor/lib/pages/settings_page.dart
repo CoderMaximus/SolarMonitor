@@ -12,12 +12,14 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   final TextEditingController _ipController = TextEditingController();
-  final TextEditingController _portController = TextEditingController();
+  final TextEditingController _wsPortController = TextEditingController();
+  final TextEditingController _httpPortController = TextEditingController();
 
   @override
   void dispose() {
     _ipController.dispose();
-    _portController.dispose();
+    _wsPortController.dispose();
+    _httpPortController.dispose();
     super.dispose();
   }
 
@@ -62,7 +64,14 @@ class _SettingsPageState extends State<SettingsPage> {
             style: FilledButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () async {
               final p = context.read<ThemeProvider>();
-              p.updateNetwork("", "");
+              p.updateNetwork("", "", "");
+              p.updateAdvancedConnection(
+                useDirectUrl: false,
+                directDataProtocol: "wss",
+                directDataHost: "",
+                directHistoryProtocol: "https",
+                directHistoryHost: "",
+              );
               await Future.delayed(const Duration(milliseconds: 300));
               exit(0);
             },
@@ -79,7 +88,8 @@ class _SettingsPageState extends State<SettingsPage> {
 
     if (_ipController.text.isEmpty && p.isInitialized) {
       _ipController.text = p.rustIp;
-      _portController.text = p.rustPort;
+      _wsPortController.text = p.rustPort;
+      _httpPortController.text = p.rustHttpPort;
     }
 
     return Scaffold(
@@ -95,9 +105,16 @@ class _SettingsPageState extends State<SettingsPage> {
                 _buildTextField(_ipController, "Server IP", Icons.lan_rounded),
                 const Divider(height: 1, indent: 50),
                 _buildTextField(
-                  _portController,
-                  "Port",
+                  _wsPortController,
+                  "WebSocket Port (e.g. 3001)",
                   Icons.settings_ethernet,
+                  isNumber: true,
+                ),
+                const Divider(height: 1, indent: 50),
+                _buildTextField(
+                  _httpPortController,
+                  "HTTP/History Port (e.g. 3000)",
+                  Icons.http_rounded,
                   isNumber: true,
                 ),
               ],
@@ -112,7 +129,11 @@ class _SettingsPageState extends State<SettingsPage> {
               ),
             ),
             onPressed: () {
-              p.updateNetwork(_ipController.text, _portController.text);
+              p.updateNetwork(
+                _ipController.text,
+                _wsPortController.text,
+                _httpPortController.text,
+              );
               FocusScope.of(context).unfocus();
               ScaffoldMessenger.of(context).showSnackBar(
                 const SnackBar(
