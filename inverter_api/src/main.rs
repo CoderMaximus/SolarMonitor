@@ -5,8 +5,11 @@ use axum::{routing::get, Router};
 use chrono::{Local, Timelike};
 use futures_util::SinkExt;
 use hidapi::{HidApi, HidDevice};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{BufReader, BufWriter};
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -22,17 +25,39 @@ struct InverterState {
     last_update: String,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct HistoryPoint {
-    x: u32, // Now represents 30-second increments
+    time: String,  // "HH:MM:SS" format
     pv: f32,
     load: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct HistoryFile {
+    data: Vec<HistoryPoint>,
+    qed: HashMap<String, f64>, // Serial Number -> QED value (kWh), updated in place
 }
 
 type SharedState = Arc<RwLock<HashMap<u8, InverterState>>>;
 
 lazy_static! {
-    static ref HISTORY: Arc<RwLock<Vec<HistoryPoint>>> = Arc::new(RwLock::new(Vec::with_capacity(2880)));
+    static ref HISTORY: Arc<RwLock<HistoryFile>> = Arc::new(RwLock::new(HistoryFile::default()));
+}
+
+fn load_today_history() -> HistoryFile {
+    let today = Local::now().format("%Y-%m-%d").to_string();
+    let file_path = Path::new("history").join(format!("{}.json", today));
+    
+    if file_path.exists() {
+        if let Ok(file) = File::open(&file_path) {
+            let reader = BufReader::new(file);
+            if let Ok(data) = serde_json::from_reader::<_, HistoryFile>(reader) {
+                println!("📂 Loaded {} history points from {}", data.data.len(), file_path.display());
+                return data;
+            }
+        }
+    }
+    HistoryFile::default()
 }
 
 #[tokio::main]
@@ -40,7 +65,13 @@ async fn main() {
     let state: SharedState = Arc::new(RwLock::new(HashMap::new()));
     let ws_state = Arc::clone(&state);
 
-    println!("🚀 PI30MAX Server Online | Logging every 30s | Ports: 3000/3001");
+    // Load existing history from today's file on startup
+    {
+        let mut h_lock = HISTORY.write().unwrap();
+        *h_lock = load_today_history();
+    }
+
+    println!("🚀 PI30MAX Server Online | Logging every 5s | Ports: 3000/3001");
 
     // 1. Hardware Workers
     let master_s = Arc::clone(&state);
@@ -49,19 +80,23 @@ async fn main() {
     let slave_s = Arc::clone(&state);
     thread::spawn(move || hardware_worker(slave_s, "/dev/inverter_slave", "Slave", 2));
 
-    // 2. Background Recorder (Graph Data - UPDATED TO 30s)
+    // 2. Background Recorder (Graph Data - every 5 seconds, saved to history/yyyy-mm-dd.json)
     let history_state = Arc::clone(&state);
     thread::spawn(move || {
         let mut last_block = -1;
+        let mut current_date = Local::now().format("%Y-%m-%d").to_string();
+        
         loop {
             let now = Local::now();
-            // Calculate which 30-second block of the day we are in (0 to 2879)
+            let today = now.format("%Y-%m-%d").to_string();
+            let time_str = now.format("%H:%M:%S").to_string();
             let total_seconds = (now.hour() * 3600 + now.minute() * 60 + now.second()) as i32;
-            let current_block = total_seconds / 30; 
+            let current_block = total_seconds / 5; // 5-second blocks (0 to 17279)
 
             if current_block != last_block {
                 let mut total_pv = 0.0;
                 let mut total_load = 0.0;
+                let mut qed_map: HashMap<String, f64> = HashMap::new();
 
                 {
                     let lock = history_state.read().unwrap();
@@ -74,31 +109,53 @@ async fn main() {
                             let a2 = fields[28].parse::<f32>().unwrap_or(0.0);
                             total_pv += (v1 * a1) + (v2 * a2);
                             total_load += fields[9].parse::<f32>().unwrap_or(0.0);
+                            
+                            // Use serial number (field index 1) as key for QED
+                            let serial = fields.get(1).cloned().unwrap_or_else(|| "unknown".to_string());
+                            let qed_val = inv.qed.parse::<f64>().unwrap_or(0.0);
+                            qed_map.insert(serial, qed_val);
                         }
                     }
                 }
 
                 let mut h_lock = HISTORY.write().unwrap();
                 
-                // Reset at start of day (Block 0 is 00:00:00 to 00:00:29)
-                if current_block == 0 && last_block != 0 { 
-                    h_lock.clear(); 
-                    println!("🌙 History reset for the new day.");
+                // Reset at start of day or if date changed
+                if today != current_date {
+                    h_lock.data.clear();
+                    h_lock.qed.clear();
+                    current_date = today.clone();
+                    println!("🌙 History reset for new day: {}", current_date);
                 }
                 
-                h_lock.push(HistoryPoint {
-                    // We store as minutes for Flutter chart compatibility (current_block / 2.0)
-                    // Or keep as block ID and adjust Flutter x-axis. 
-                    // Let's use total_seconds/60.0 to keep Flutter's 0-1440 scale working.
-                    x: (total_seconds as f32 / 60.0 * 10.0).round() as u32 / 10, 
+                // Add new data point
+                let point = HistoryPoint {
+                    time: time_str,
                     pv: total_pv,
                     load: total_load,
-                });
+                };
+                h_lock.data.push(point);
+                
+                // Update QED values (overwrites with latest)
+                for (serial, qed_val) in qed_map {
+                    h_lock.qed.insert(serial, qed_val);
+                }
+                
+                // Save to file
+                let history_dir = Path::new("history");
+                if !history_dir.exists() {
+                    let _ = fs::create_dir_all(history_dir);
+                }
+                
+                let file_path = history_dir.join(format!("{}.json", today));
+                if let Ok(file) = File::create(&file_path) {
+                    let writer = BufWriter::new(file);
+                    let _ = serde_json::to_writer(writer, &*h_lock);
+                }
                 
                 last_block = current_block;
             }
-            // Check every 5 seconds so we don't miss the start of a 30s block
-            thread::sleep(Duration::from_secs(5));
+            thread::sleep(Duration::from_secs(1)); // Check every 1 second to stay in sync
         }
     });
 
@@ -123,10 +180,69 @@ async fn main() {
     });
 
     // 4. REST API
-    let app = Router::new().route(
-        "/history",
-        get(|| async { axum::Json(HISTORY.read().unwrap().clone()) }),
-    );
+    let app = Router::new()
+        .route(
+            "/history",
+            get(|| async { axum::Json(HISTORY.read().unwrap().clone()) }),
+        )
+        .route(
+            "/dates",
+            get(|| async {
+                let history_dir = Path::new("history");
+                let mut dates: Vec<String> = Vec::new();
+                
+                if history_dir.exists() {
+                    if let Ok(entries) = fs::read_dir(history_dir) {
+                        for entry in entries.flatten() {
+                            if let Some(name) = entry.file_name().to_str() {
+                                if name.ends_with(".json") {
+                                    // Extract date from filename (yyyy-mm-dd.json -> yyyy-mm-dd)
+                                    dates.push(name.trim_end_matches(".json").to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                dates.sort();
+                axum::Json(dates)
+            }),
+        )
+        .route(
+            "/history/{date}",
+            get(|axum::extract::Path(date): axum::extract::Path<String>| async move {
+                // If requesting today's date, return in-memory data
+                let today = Local::now().format("%Y-%m-%d").to_string();
+                if date == today {
+                    let data = HISTORY.read().unwrap().clone();
+                    return axum::response::Response::builder()
+                        .status(axum::http::StatusCode::OK)
+                        .header("Content-Type", "application/json")
+                        .body(axum::body::Body::from(serde_json::to_string(&data).unwrap()))
+                        .unwrap();
+                }
+                
+                // Otherwise, read from file
+                let file_path = Path::new("history").join(format!("{}.json", date));
+                if file_path.exists() {
+                    if let Ok(file) = File::open(&file_path) {
+                        let reader = BufReader::new(file);
+                        if let Ok(data) = serde_json::from_reader::<_, HistoryFile>(reader) {
+                            return axum::response::Response::builder()
+                                .status(axum::http::StatusCode::OK)
+                                .header("Content-Type", "application/json")
+                                .body(axum::body::Body::from(serde_json::to_string(&data).unwrap()))
+                                .unwrap();
+                        }
+                    }
+                }
+                axum::response::Response::builder()
+                    .status(axum::http::StatusCode::NOT_FOUND)
+                    .header("Content-Type", "application/json")
+                    .body(axum::body::Body::from("{\"data\":[],\"qed\":{}}"))
+                    .unwrap()
+            }),
+        );
 
     let addr = "0.0.0.0:3000".parse::<std::net::SocketAddr>().unwrap();
     let listener = TcpListener::bind(addr).await.unwrap();

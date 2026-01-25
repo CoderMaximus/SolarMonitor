@@ -5,6 +5,7 @@ import 'extras/theme_provider.dart';
 import 'pages/tiles_page.dart';
 import 'pages/settings_page.dart';
 import 'pages/graph_page.dart';
+import 'pages/history_page.dart';
 import 'alt/alt_dashboard.dart';
 
 void main() async {
@@ -65,26 +66,35 @@ class _MainEntryPageState extends State<MainEntryPage> {
     super.dispose();
   }
 
+  // Icon pairs: [outlined, filled]
+  static const List<List<IconData>> _standardIcons = [
+    [Icons.dashboard_outlined, Icons.dashboard_rounded],
+    [Icons.history_outlined, Icons.history_rounded],
+    [Icons.power_outlined, Icons.power_rounded],
+    [Icons.settings_outlined, Icons.settings_rounded],
+  ];
+
+  static const List<List<IconData>> _altIcons = [
+    [Icons.bolt_outlined, Icons.bolt_rounded],
+    [Icons.analytics_outlined, Icons.analytics_rounded],
+    [Icons.history_outlined, Icons.history_rounded],
+    [Icons.settings_outlined, Icons.settings_rounded],
+  ];
+
+  static const List<String> _standardLabels = ['Dashboard', 'History', 'Units', 'Settings'];
+  static const List<String> _altLabels = ['Live', 'Statistics', 'History', 'Settings'];
+
   @override
   Widget build(BuildContext context) {
     final provider = context.watch<ThemeProvider>();
     final color = provider.seedColor;
 
     final List<Widget> pages = provider.uiMode == 'standard'
-        ? [const GraphPage(), const TilesPage(), const SettingsPage()]
-        : [const AltDashboard(), const GraphPage(), const SettingsPage()];
+        ? [const GraphPage(), const HistoryPage(), const TilesPage(), const SettingsPage()]
+        : [const AltDashboard(), const GraphPage(), const HistoryPage(), const SettingsPage()];
 
-    final List<GButton> tabs = provider.uiMode == 'standard'
-        ? const [
-            GButton(icon: Icons.dashboard_rounded, text: 'Dashboard'),
-            GButton(icon: Icons.power_rounded, text: 'Units'),
-            GButton(icon: Icons.settings_rounded, text: 'Settings'),
-          ]
-        : const [
-            GButton(icon: Icons.bolt_rounded, text: 'Live'),
-            GButton(icon: Icons.analytics_rounded, text: 'Statistics'),
-            GButton(icon: Icons.settings_rounded, text: 'Settings'),
-          ];
+    final icons = provider.uiMode == 'standard' ? _standardIcons : _altIcons;
+    final labels = provider.uiMode == 'standard' ? _standardLabels : _altLabels;
 
     return Scaffold(
       body: PageView(
@@ -134,7 +144,13 @@ class _MainEntryPageState extends State<MainEntryPage> {
                   curve: Curves.easeInOutCubic,
                 );
               },
-              tabs: tabs,
+              tabs: List.generate(pages.length, (index) {
+                final isSelected = _currentIndex == index;
+                return GButton(
+                  icon: isSelected ? icons[index][1] : icons[index][0],
+                  text: labels[index],
+                );
+              }),
             ),
           ),
         ),

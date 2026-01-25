@@ -18,6 +18,7 @@ class GraphPage extends StatefulWidget {
 class _GraphPageState extends State<GraphPage> {
   final List<FlSpot> _loadSpots = [];
   final List<FlSpot> _pvSpots = [];
+  final Map<double, String> _timeLabels = {}; // x value -> "HH:MM:SS" for tooltip
   bool _isFetchingHistory = false;
   bool _showPV = true;
   bool _showLoad = true;
@@ -53,7 +54,7 @@ class _GraphPageState extends State<GraphPage> {
 
   void _startAutoRefresh() {
     _refreshTimer?.cancel();
-    _refreshTimer = Timer.periodic(const Duration(minutes: 5), (timer) {
+    _refreshTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       _fetchHistory(shouldJump: false);
     });
   }
@@ -215,13 +216,26 @@ class _GraphPageState extends State<GraphPage> {
     try {
       final res = await http.get(Uri.parse("${p.httpUrl}/history"));
       if (res.statusCode == 200) {
-        final List<dynamic> data = jsonDecode(res.body);
+        final Map<String, dynamic> json = jsonDecode(res.body);
+        final List<dynamic> data = json['data'] ?? [];
         final List<FlSpot> tLoad = [];
         final List<FlSpot> tPv = [];
+        final Map<double, String> tLabels = {};
+        
         for (var pt in data) {
-          double x = (pt['x'] as num).toDouble();
+          // Parse time string "HH:MM:SS" to x value (fractional minutes)
+          final String timeStr = pt['time'] ?? "00:00:00";
+          final parts = timeStr.split(':');
+          final int hours = int.tryParse(parts[0]) ?? 0;
+          final int minutes = int.tryParse(parts.length > 1 ? parts[1] : '0') ?? 0;
+          final int seconds = int.tryParse(parts.length > 2 ? parts[2] : '0') ?? 0;
+          
+          // x = total minutes as decimal (e.g., 13:45:30 = 825.5)
+          double x = hours * 60 + minutes + (seconds / 60.0);
+          
           tLoad.add(FlSpot(x, (pt['load'] as num).toDouble()));
           tPv.add(FlSpot(x, (pt['pv'] as num).toDouble()));
+          tLabels[x] = timeStr; // Store the exact time string for tooltip
         }
         tLoad.sort((a, b) => a.x.compareTo(b.x));
         tPv.sort((a, b) => a.x.compareTo(b.x));
@@ -230,8 +244,10 @@ class _GraphPageState extends State<GraphPage> {
           setState(() {
             _loadSpots.clear();
             _pvSpots.clear();
+            _timeLabels.clear();
             _loadSpots.addAll(tLoad);
             _pvSpots.addAll(tPv);
+            _timeLabels.addAll(tLabels);
             if (shouldJump || !_hasJumpedOnce) {
               WidgetsBinding.instance.addPostFrameCallback(
                 (_) => _jumpToCurrentTime(),
@@ -328,15 +344,23 @@ class _GraphPageState extends State<GraphPage> {
             return touchedSpots.map((LineBarSpot touchedSpot) {
               final isSolar = touchedSpot.barIndex == 0;
               final textColor = isSolar ? Colors.green : color;
-              final int totalMinutes = touchedSpot.x.toInt();
-              final String hour = (totalMinutes ~/ 60).toString().padLeft(
-                2,
-                '0',
-              );
-              final String min = (totalMinutes % 60).toString().padLeft(2, '0');
+              
+              // Try to get exact time from stored labels, fallback to calculated
+              String timeDisplay;
+              if (_timeLabels.containsKey(touchedSpot.x)) {
+                timeDisplay = _timeLabels[touchedSpot.x]!;
+              } else {
+                // Fallback: calculate from x value (fractional minutes)
+                final int totalMinutes = touchedSpot.x.toInt();
+                final int seconds = ((touchedSpot.x - totalMinutes) * 60).round();
+                final String hour = (totalMinutes ~/ 60).toString().padLeft(2, '0');
+                final String min = (totalMinutes % 60).toString().padLeft(2, '0');
+                final String sec = seconds.toString().padLeft(2, '0');
+                timeDisplay = '$hour:$min:$sec';
+              }
 
               return LineTooltipItem(
-                '$hour:$min\n',
+                '$timeDisplay\n',
                 const TextStyle(color: Colors.white, fontSize: 10),
                 children: [
                   TextSpan(
