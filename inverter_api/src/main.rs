@@ -1,32 +1,47 @@
 #[macro_use]
 extern crate lazy_static;
 
-use axum::{routing::get, Router};
+use axum::{routing::get, extract::Path, Router};          // FIX: added extract::Path
 use chrono::{Local, Timelike};
 use futures_util::SinkExt;
 use hidapi::{HidApi, HidDevice};
-use serde::Serialize;
+use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
+use std::fs;
 use std::sync::{Arc, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
+use tower_http::cors::{CorsLayer, Any};
+
+const DATA_DIR: &str = "./history";
 
 #[derive(Serialize, Clone, Default, Debug)]
 struct InverterState {
     label: String,
+    serial: String,
     raw_data: Vec<String>,
     qed: String,
+    qld: String,
+    qbd: String,
     last_update: String,
 }
 
-#[derive(Serialize, Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct HistoryPoint {
-    x: u32, // Now represents 30-second increments
+    x: u32,
     pv: f32,
     load: f32,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct HistoryResponse {
+    data: Vec<HistoryPoint>,
+    qed: HashMap<String, f64>,
+    qld: HashMap<String, f64>,
+    qbd: HashMap<String, f64>,
 }
 
 type SharedState = Arc<RwLock<HashMap<u8, InverterState>>>;
@@ -35,29 +50,88 @@ lazy_static! {
     static ref HISTORY: Arc<RwLock<Vec<HistoryPoint>>> = Arc::new(RwLock::new(Vec::with_capacity(2880)));
 }
 
+fn save_history_to_file(state: &SharedState) {
+    let date = Local::now().format("%Y-%m-%d").to_string();
+    let path = format!("{}/{}.json", DATA_DIR, date);
+
+    let snapshot = {
+        let h = HISTORY.read().unwrap();
+        let lock = state.read().unwrap();
+        let mut qed_map = HashMap::new();
+        let mut qld_map = HashMap::new();
+        let mut qbd_map = HashMap::new();
+        for inv in lock.values() {
+            if !inv.serial.is_empty() {
+                qed_map.insert(inv.serial.clone(), inv.qed.parse::<f64>().unwrap_or(0.0));
+                qld_map.insert(inv.serial.clone(), inv.qld.parse::<f64>().unwrap_or(0.0));
+                qbd_map.insert(inv.serial.clone(), inv.qbd.parse::<f64>().unwrap_or(0.0));
+            }
+        }
+        HistoryResponse {
+            data: h.clone(),
+            qed: qed_map,
+            qld: qld_map,
+            qbd: qbd_map,
+        }
+    };
+
+    let _ = fs::create_dir_all(DATA_DIR);
+    if let Ok(json) = serde_json::to_string(&snapshot) {
+        let _ = fs::write(&path, json);
+    }
+}
+
+fn load_history_from_file() -> Option<HashMap<String, (f64, f64, f64)>> {
+    let date = Local::now().format("%Y-%m-%d").to_string();
+    let path = format!("{}/{}.json", DATA_DIR, date);
+
+    let contents = fs::read_to_string(&path).ok()?;
+    let response: HistoryResponse = serde_json::from_str(&contents).ok()?;
+
+    let count = response.data.len();
+    {
+        let mut h_lock = HISTORY.write().unwrap();
+        h_lock.clear();
+        h_lock.extend(response.data);
+    }
+
+    let mut energy_cache: HashMap<String, (f64, f64, f64)> = HashMap::new();
+    for serial in response.qed.keys() {
+        let qed = response.qed.get(serial).copied().unwrap_or(0.0);
+        let qld = response.qld.get(serial).copied().unwrap_or(0.0);
+        let qbd = response.qbd.get(serial).copied().unwrap_or(0.0);
+        energy_cache.insert(serial.clone(), (qed, qld, qbd));
+    }
+
+    println!("📂 Loaded {} history points from {}", count, path);
+    Some(energy_cache)
+}
+
 #[tokio::main]
 async fn main() {
     let state: SharedState = Arc::new(RwLock::new(HashMap::new()));
     let ws_state = Arc::clone(&state);
+    let api_state = Arc::clone(&state);
 
     println!("🚀 PI30MAX Server Online | Logging every 30s | Ports: 3000/3001");
 
-    // 1. Hardware Workers
+    let cached_energy = load_history_from_file();
+
     let master_s = Arc::clone(&state);
-    thread::spawn(move || hardware_worker(master_s, "/dev/inverter_master", "Master", 1));
+    let master_energy = cached_energy.as_ref().and_then(|m| m.get("92932207101268").cloned());
+    thread::spawn(move || hardware_worker(master_s, "/dev/inverter_master", "Master", 1, master_energy));
 
     let slave_s = Arc::clone(&state);
-    thread::spawn(move || hardware_worker(slave_s, "/dev/inverter_slave", "Slave", 2));
+    let slave_energy = cached_energy.as_ref().and_then(|m| m.get("92932207101267").cloned());
+    thread::spawn(move || hardware_worker(slave_s, "/dev/inverter_slave", "Slave", 2, slave_energy));
 
-    // 2. Background Recorder (Graph Data - UPDATED TO 30s)
     let history_state = Arc::clone(&state);
     thread::spawn(move || {
         let mut last_block = -1;
         loop {
             let now = Local::now();
-            // Calculate which 30-second block of the day we are in (0 to 2879)
             let total_seconds = (now.hour() * 3600 + now.minute() * 60 + now.second()) as i32;
-            let current_block = total_seconds / 30; 
+            let current_block = total_seconds / 30;
 
             if current_block != last_block {
                 let mut total_pv = 0.0;
@@ -79,30 +153,27 @@ async fn main() {
                 }
 
                 let mut h_lock = HISTORY.write().unwrap();
-                
-                // Reset at start of day (Block 0 is 00:00:00 to 00:00:29)
-                if current_block == 0 && last_block != 0 { 
-                    h_lock.clear(); 
+
+                if current_block == 0 && last_block != 0 {
+                    h_lock.clear();
                     println!("🌙 History reset for the new day.");
                 }
-                
+
                 h_lock.push(HistoryPoint {
-                    // We store as minutes for Flutter chart compatibility (current_block / 2.0)
-                    // Or keep as block ID and adjust Flutter x-axis. 
-                    // Let's use total_seconds/60.0 to keep Flutter's 0-1440 scale working.
-                    x: (total_seconds as f32 / 60.0 * 10.0).round() as u32 / 10, 
+                    x: (total_seconds as f32 / 60.0 * 10.0).round() as u32 / 10,
                     pv: total_pv,
                     load: total_load,
                 });
-                
+                drop(h_lock);
+
+                save_history_to_file(&history_state);
+
                 last_block = current_block;
             }
-            // Check every 5 seconds so we don't miss the start of a 30s block
             thread::sleep(Duration::from_secs(5));
         }
     });
 
-    // 3. WebSocket Server (1000ms Push)
     tokio::spawn(async move {
         let listener = TcpListener::bind("0.0.0.0:3001").await.unwrap();
         while let Ok((stream, _)) = listener.accept().await {
@@ -122,52 +193,141 @@ async fn main() {
         }
     });
 
-    // 4. REST API
-    let app = Router::new().route(
-        "/history",
-        get(|| async { axum::Json(HISTORY.read().unwrap().clone()) }),
-    );
+    // ═══════════════════════════════════════════════════
+    // 4. REST API  — CHANGED: added /history/{date} route
+    // ═══════════════════════════════════════════════════
+
+    // Helper: build a HistoryResponse from the live in-memory state (for /history — today)
+    let api_state_today = Arc::clone(&api_state);
+    let today_handler = move || {
+        let state_for_request = Arc::clone(&api_state_today);
+        async move {
+            let (data, qed_map, qld_map, qbd_map) = {
+                let h = HISTORY.read().unwrap().clone();
+                let lock = state_for_request.read().unwrap();
+                let mut qed_map = HashMap::new();
+                let mut qld_map = HashMap::new();
+                let mut qbd_map = HashMap::new();
+                for inv in lock.values() {
+                    if !inv.serial.is_empty() {
+                        qed_map.insert(inv.serial.clone(), inv.qed.parse::<f64>().unwrap_or(0.0));
+                        qld_map.insert(inv.serial.clone(), inv.qld.parse::<f64>().unwrap_or(0.0));
+                        qbd_map.insert(inv.serial.clone(), inv.qbd.parse::<f64>().unwrap_or(0.0));
+                    }
+                }
+                (h, qed_map, qld_map, qbd_map)
+            };
+            axum::Json(HistoryResponse { data, qed: qed_map, qld: qld_map, qbd: qbd_map })
+        }
+    };
+
+    // FIX: new handler — reads a historical JSON file by date
+    let date_handler = |Path(date): Path<String>| async move {
+        // Validate: must be exactly 10 chars and YYYY-MM-DD format
+        let is_valid = date.len() == 10
+            && date.chars().nth(4) == Some('-')
+            && date.chars().nth(7) == Some('-')
+            && date.chars().all(|c| c.is_ascii_digit() || c == '-');
+
+        if !is_valid {
+            return axum::response::Json(serde_json::json!({"error": "Invalid date format. Use YYYY-MM-DD"}));
+        }
+
+        let path = format!("{}/{}.json", DATA_DIR, date);
+        match fs::read_to_string(&path) {
+            Ok(contents) => {
+                // File already stored as HistoryResponse JSON — return directly
+                match serde_json::from_str::<serde_json::Value>(&contents) {
+                    Ok(val) => axum::response::Json(val),
+                    Err(_) => axum::response::Json(serde_json::json!({"error": "Corrupt history file"})),
+                }
+            }
+            Err(_) => axum::response::Json(serde_json::json!({"error": "No history for this date", "data": [], "qed": {}, "qld": {}, "qbd": {}})),
+        }
+    };
+
+    let earliest_handler = || async move {
+        let _ = fs::create_dir_all(DATA_DIR);
+        let mut earliest: Option<String> = None;
+        if let Ok(entries) = fs::read_dir(DATA_DIR) {
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.ends_with(".json") {
+                        let date = name.trim_end_matches(".json").to_string();
+                        if date.len() == 10 {
+                            match &earliest {
+                                None => earliest = Some(date),
+                                Some(current) => {
+                                    if date < *current {
+                                        earliest = Some(date);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        axum::Json(serde_json::json!({"earliest": earliest}))
+    };
+
+    let app = Router::new()
+        .route("/history", get(today_handler))
+        .route("/history/{date}", get(date_handler))
+        .route("/history/earliest", get(earliest_handler))         // FIX: new endpoint
+        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any));
 
     let addr = "0.0.0.0:3000".parse::<std::net::SocketAddr>().unwrap();
     let listener = TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
 
-fn hardware_worker(state: SharedState, path: &str, label: &str, id: u8) {
+fn hardware_worker(state: SharedState, path: &str, label: &str, id: u8, cached_energy: Option<(f64, f64, f64)>) {
     let api = HidApi::new().expect("HID Init Fail");
-    let mut last_qed_query = Instant::now() - Duration::from_secs(600);
-    let mut cached_qed = String::from("0.00");
+    let mut last_energy_query = Instant::now() - Duration::from_secs(600);
+
+    let (mut cached_qed, mut cached_qld, mut cached_qbd) = if let Some((qed, qld, qbd)) = cached_energy {
+        (format!("{:.2}", qed), format!("{:.2}", qld), format!("{:.2}", qbd))
+    } else {
+        (String::from("0.00"), String::from("0.00"), String::from("0.00"))
+    };
 
     loop {
         if let Ok(dev) = api.open_path(&std::ffi::CString::new(path).unwrap()) {
             if let Some(fields) = query_and_parse_safe(&dev, &format!("QPGS{}", id)) {
-                
-                // QED Check with 8-character validation
-                if last_qed_query.elapsed() > Duration::from_secs(300) {
-                    let date = Local::now().format("%Y%m%d").to_string();
-                    if let Some(resp_bytes) = send_and_receive_raw(&dev, &format!("QED{}", date)) {
-                        let start_pos = resp_bytes.iter().position(|&b| b == 0x28).map(|i| i + 1).unwrap_or(0);
-                        let end_pos = resp_bytes.iter().position(|&b| b == 0x0D).unwrap_or(resp_bytes.len());
-                        if end_pos > start_pos {
-                            let clean_data = String::from_utf8_lossy(&resp_bytes[start_pos..end_pos]);
-                            let numeric_part: String = clean_data.chars().take_while(|c| c.is_numeric()).collect();
 
-                            if numeric_part.len() == 8 {
-                                if let Ok(wh_val) = numeric_part.parse::<f64>() {
-                                    cached_qed = format!("{:.2}", wh_val / 1000.0);
-                                    last_qed_query = Instant::now();
-                                }
-                            }
-                        }
+                if last_energy_query.elapsed() > Duration::from_secs(300) {
+                    let date = Local::now().format("%Y%m%d").to_string();
+
+                    let qed_val = send_and_receive_raw(&dev, &format!("QED{}", date))
+                        .and_then(|bytes| parse_energy_wh(&bytes))
+                        .map(|wh| format!("{:.2}", wh / 1000.0));
+
+                    let qld_val = send_and_receive_raw(&dev, &format!("QLD{}", date))
+                        .and_then(|bytes| parse_energy_wh(&bytes))
+                        .map(|wh| format!("{:.2}", wh / 1000.0));
+
+                    if let (Some(qed), Some(qld)) = (qed_val, qld_val) {
+                        let qed_num = qed.parse::<f64>().unwrap_or(0.0);
+                        let qld_num = qld.parse::<f64>().unwrap_or(0.0);
+                        cached_qed = qed;
+                        cached_qld = qld;
+                        cached_qbd = format!("{:.2}", qed_num - qld_num);
+                        last_energy_query = Instant::now();
                     }
                 }
+
+                let serial = if fields.len() > 1 { fields[1].clone() } else { String::new() };
 
                 state.write().unwrap().insert(
                     id,
                     InverterState {
                         label: label.to_string(),
+                        serial,
                         raw_data: fields,
                         qed: cached_qed.clone(),
+                        qld: cached_qld.clone(),
+                        qbd: cached_qbd.clone(),
                         last_update: Local::now().format("%H:%M:%S").to_string(),
                     },
                 );
@@ -177,11 +337,24 @@ fn hardware_worker(state: SharedState, path: &str, label: &str, id: u8) {
     }
 }
 
+fn parse_energy_wh(resp_bytes: &[u8]) -> Option<f64> {
+    let start_pos = resp_bytes.iter().position(|&b| b == 0x28).map(|i| i + 1).unwrap_or(0);
+    let end_pos = resp_bytes.iter().position(|&b| b == 0x0D).unwrap_or(resp_bytes.len());
+    if end_pos <= start_pos { return None; }
+    let clean_data = String::from_utf8_lossy(&resp_bytes[start_pos..end_pos]);
+    let numeric_part: String = clean_data.chars().take_while(|c| c.is_numeric()).collect();
+    if numeric_part.len() == 8 {
+        numeric_part.parse::<f64>().ok()
+    } else {
+        None
+    }
+}
+
 pub fn query_and_parse_safe(device: &HidDevice, command: &str) -> Option<Vec<String>> {
     let resp_bytes = send_and_receive_raw(device, command)?;
     let start_pos = resp_bytes.iter().position(|&b| b == 0x28).map(|i| i + 1).unwrap_or(0);
     let end_pos = resp_bytes.iter().position(|&b| b == 0x0D).unwrap_or(resp_bytes.len());
-    let data_end = if end_pos > 2 { end_pos - 2 } else { end_pos }; 
+    let data_end = if end_pos > 2 { end_pos - 2 } else { end_pos };
     if data_end <= start_pos { return None; }
     let clean_str = String::from_utf8_lossy(&resp_bytes[start_pos..data_end]);
     Some(clean_str.split_whitespace().map(|s| s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.').collect()).collect())
